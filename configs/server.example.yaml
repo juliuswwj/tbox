@@ -57,3 +57,17 @@ clients:
 #   # bridge: "br0"                # optional: enslave the TAP to a bridge
 #   enable_passthrough: true       # IPv6: add /80 routes + restart ndppd
 #   # ipv6_prefix: "2001:db8:0:42::/80"
+
+# OPTIONAL: fail2ban-style banning of the HTTP publishing path. tbox watches
+# upstream responses (it sees the real client IP + status) and bans abusive
+# sources. Defaults below; all fields optional once enable is set.
+# ban:
+#   enable: true
+#   methods: ["POST"]          # request methods that count toward a failure
+#   statuses: [401, 403]       # ... when answered with these statuses
+#   # path: "/websh/api/login" # optional: only count failures under this prefix
+#   threshold: 5               # failures from one IP within window -> ban it
+#   window: "10m"
+#   ban_duration: "1h"
+#   subnet_threshold: 2        # distinct banned IPs in a /24 -> ban the /24 (0=off)
+#   exempt: ["203.0.113.0/24"] # sources never counted or banned

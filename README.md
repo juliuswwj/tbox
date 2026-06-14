@@ -68,6 +68,11 @@ ordinary HTTPS traffic to a real site (e.g. `www.microsoft.com`):
 - **Dynamic source-IP whitelist**: each service has an atomically swappable CIDR
   allow list, enforced at L4 and again at the HTTP layer, and changeable at
   runtime via `tbox whitelist` (keyed by service URL).
+- **Brute-force banning** (optional): the HTTP path can watch upstream responses
+  and ban abusive sources fail2ban-style — by default a `POST` answered with
+  `401`/`403` counts as a failed auth, and an IP that crosses the threshold is
+  blocked for an hour, escalating to its whole `/24`. See
+  [HTTP brute-force banning](#http-brute-force-banning).
 - **L2 tunnel** (when enabled): a dedicated yamux stream per client carries
   length-prefixed Ethernet frames. The server runs a userspace learning switch
   whose ports are the local TAP plus each client's stream; clients run the same
@@ -181,6 +186,36 @@ The server, and any client using a native TAP or `accept_default_route`, needs
 `CAP_NET_ADMIN`. IPv6 passthrough additionally requires `ndppd` installed and
 configured by the operator for the pool prefix; tbox adds the per-host `/80`
 routes and restarts it.
+
+## HTTP brute-force banning
+
+Because the publish path is a reverse proxy, tbox sees both the **real client
+IP** (the connection remote, never `X-Forwarded-For`) and the **upstream
+response status**. That's enough for fail2ban-style protection of an app's login
+without any change to the app. Enable it in `server.yaml`:
+
+```yaml
+ban:
+  enable: true
+  # What counts as one failed auth attempt (defaults shown):
+  methods: ["POST"]        # only these request methods
+  statuses: [401, 403]     # ... answered with these statuses
+  # path: "/websh/api/login"  # optional: restrict to a login path prefix
+  # Thresholds:
+  threshold: 5             # failures from one IP within `window` ...
+  window: "10m"            # ... the sliding window ...
+  ban_duration: "1h"       # ... ban that IP for this long.
+  subnet_threshold: 2      # once this many distinct IPs in a /24 are banned,
+                           # ban the whole /24 too (0 disables; IPv4 only).
+  exempt: ["203.0.113.0/24"]  # sources never counted or banned (e.g. your own)
+```
+
+Why `POST` + `401/403` by default: a brute-forcer hammers `POST /api/login`,
+while a normal first visit that hits an unauthenticated `GET /api/me` → `401` is
+a `GET` and is **not** counted, so legitimate users aren't banned. A banned
+source gets a `403` on every HTTP publish service (before any upstream work).
+State is in-memory (cleared on restart). This guards the HTTP publish path only;
+raw `tcp`/`socks5` services are not covered.
 
 ## Running as a service
 

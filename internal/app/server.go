@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
+	"github.com/juliuswwj/tbox/internal/ban"
 	"github.com/juliuswwj/tbox/internal/config"
 	"github.com/juliuswwj/tbox/internal/control"
 	"github.com/juliuswwj/tbox/internal/l2"
@@ -94,7 +97,11 @@ func RunServer(cfg *config.ServerConfig) error {
 	}()
 	logger.Printf("control plane on %s (%d client credential(s))", cfg.ControlAddr, len(clientMap))
 
-	router := l4router.New(reg, cfg.RealityInboundAddr, logger)
+	banner, err := setupBanner(cfg, logger)
+	if err != nil {
+		return fmt.Errorf("ban: %w", err)
+	}
+	router := l4router.New(reg, cfg.RealityInboundAddr, banner, logger)
 
 	errc := make(chan error, 1)
 	go func() { errc <- router.ListenAndServe(cfg.Listen) }()
@@ -108,6 +115,41 @@ func RunServer(cfg *config.ServerConfig) error {
 	case err := <-errc:
 		return fmt.Errorf("l4 router: %w", err)
 	}
+}
+
+// setupBanner builds the fail2ban-style HTTP throttle when enabled. Durations
+// and CIDRs are already validated by LoadServer.
+func setupBanner(cfg *config.ServerConfig, logger *log.Logger) (*ban.Banner, error) {
+	if !cfg.Ban.Enable {
+		return nil, nil
+	}
+	b := cfg.Ban
+	window, _ := time.ParseDuration(b.Window)
+	banDur, _ := time.ParseDuration(b.BanDuration)
+	subnet := 2
+	if b.SubnetThreshold != nil {
+		subnet = *b.SubnetThreshold
+	}
+	exempt := make([]netip.Prefix, 0, len(b.Exempt))
+	for _, c := range b.Exempt {
+		p, err := netip.ParsePrefix(c)
+		if err != nil {
+			return nil, fmt.Errorf("exempt %q: %w", c, err)
+		}
+		exempt = append(exempt, p)
+	}
+	logger.Printf("http ban: %d failures/%s -> ban %s (subnet escalation: %d IPs/24); methods=%v statuses=%v",
+		b.Threshold, b.Window, b.BanDuration, subnet, b.Methods, b.Statuses)
+	return ban.New(ban.Config{
+		Methods:         b.Methods,
+		Statuses:        b.Statuses,
+		PathPrefix:      b.Path,
+		Window:          window,
+		Threshold:       b.Threshold,
+		BanDuration:     banDur,
+		SubnetThreshold: subnet,
+		Exempt:          exempt,
+	}), nil
 }
 
 // setupTunHub starts the server-side L2 tunnel hub when enabled: it creates the

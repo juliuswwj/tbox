@@ -86,7 +86,7 @@ func TestEndToEnd(t *testing.T) {
 	defer ctrlLn.Close()
 	go csrv.Serve(ctrlLn)
 
-	router := l4router.New(reg, realityAddr, logger)
+	router := l4router.New(reg, realityAddr, nil, logger)
 	go func() { _ = router.ListenAndServe(publicAddr) }()
 	waitDial(t, publicAddr)
 

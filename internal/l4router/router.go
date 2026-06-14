@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juliuswwj/tbox/internal/ban"
 	"github.com/juliuswwj/tbox/internal/control"
 	"github.com/juliuswwj/tbox/internal/publish"
 	"github.com/juliuswwj/tbox/internal/tunnel"
@@ -33,7 +34,8 @@ type Logger interface {
 // Router routes inbound :443 connections by SNI.
 type Router struct {
 	reg         *control.Registry
-	realityAddr string // address of the embedded sing-box reality inbound
+	realityAddr string      // address of the embedded sing-box reality inbound
+	banner      *ban.Banner // nil = banning disabled
 	logger      Logger
 
 	publishLn *connListener
@@ -48,11 +50,12 @@ type cachedHandler struct {
 	h       *publish.Handler
 }
 
-// New creates a Router.
-func New(reg *control.Registry, realityAddr string, logger Logger) *Router {
+// New creates a Router. banner may be nil to disable HTTP fail2ban throttling.
+func New(reg *control.Registry, realityAddr string, banner *ban.Banner, logger Logger) *Router {
 	r := &Router{
 		reg:         reg,
 		realityAddr: realityAddr,
+		banner:      banner,
 		logger:      logger,
 		publishLn:   newConnListener(),
 		handler:     make(map[string]*cachedHandler),
@@ -200,7 +203,7 @@ func (r *Router) handlerFor(host string, services []*control.Service) *publish.H
 	if c, ok := r.handler[host]; ok && c.version == v {
 		return c.h
 	}
-	h := publish.NewHandler(services, r.logger)
+	h := publish.NewHandler(services, r.banner, r.logger)
 	r.handler[host] = &cachedHandler{version: v, h: h}
 	return h
 }

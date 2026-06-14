@@ -6,10 +6,12 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -48,6 +50,23 @@ type ServerConfig struct {
 	Certs []CertFile `yaml:"certs"`
 	// Tun enables the L2 (TAP) tunnel data plane on the server (the hub).
 	Tun ServerTun `yaml:"tun"`
+	// Ban enables fail2ban-style throttling of the HTTP publishing path.
+	Ban ServerBan `yaml:"ban"`
+}
+
+// ServerBan configures fail2ban-style banning on the HTTP publishing path: it
+// counts auth failures (by default POST responses with 401/403) per source IP
+// and bans an IP, escalating to its /24, when thresholds are crossed.
+type ServerBan struct {
+	Enable          bool     `yaml:"enable"`
+	Methods         []string `yaml:"methods"`          // default ["POST"]
+	Statuses        []int    `yaml:"statuses"`         // default [401, 403]
+	Path            string   `yaml:"path"`             // optional request-path prefix filter
+	Window          string   `yaml:"window"`           // default "10m"
+	Threshold       int      `yaml:"threshold"`        // default 5
+	BanDuration     string   `yaml:"ban_duration"`     // default "1h"
+	SubnetThreshold *int     `yaml:"subnet_threshold"` // default 2; 0 disables /24 escalation
+	Exempt          []string `yaml:"exempt"`           // CIDRs never counted or blocked
 }
 
 // ClientCred is a single authorized client (one VLESS user).
@@ -200,7 +219,47 @@ func LoadServer(path string) (*ServerConfig, error) {
 			return nil, fmt.Errorf("tun: %w", err)
 		}
 	}
+	if c.Ban.Enable {
+		if err := validateServerBan(&c.Ban); err != nil {
+			return nil, fmt.Errorf("ban: %w", err)
+		}
+	}
 	return &c, nil
+}
+
+// validateServerBan fills defaults and validates the ban block.
+func validateServerBan(b *ServerBan) error {
+	if len(b.Methods) == 0 {
+		b.Methods = []string{"POST"}
+	}
+	if len(b.Statuses) == 0 {
+		b.Statuses = []int{401, 403}
+	}
+	if b.Window == "" {
+		b.Window = "10m"
+	}
+	if b.BanDuration == "" {
+		b.BanDuration = "1h"
+	}
+	if b.Threshold <= 0 {
+		b.Threshold = 5
+	}
+	if b.SubnetThreshold == nil {
+		def := 2
+		b.SubnetThreshold = &def
+	}
+	if _, err := time.ParseDuration(b.Window); err != nil {
+		return fmt.Errorf("invalid window %q: %w", b.Window, err)
+	}
+	if _, err := time.ParseDuration(b.BanDuration); err != nil {
+		return fmt.Errorf("invalid ban_duration %q: %w", b.BanDuration, err)
+	}
+	for _, c := range b.Exempt {
+		if _, err := netip.ParsePrefix(c); err != nil {
+			return fmt.Errorf("invalid exempt CIDR %q: %w", c, err)
+		}
+	}
+	return nil
 }
 
 // validateServerTun fills defaults and validates the server tun block.
