@@ -1,0 +1,36 @@
+# tbox server (runs on the VPS).
+#
+# Generate reality_private_key / reality_public_key / short_id and a client
+# uuid with:  tbox gen-keypair
+# Then emit per-client tokens with:  tbox gen-token -c server.yaml --client <name>
+
+# Public L4 SNI router address. Owns 443: SNI=mimic -> REALITY proxy;
+# SNI=a published domain -> TLS terminate + reverse proxy; else -> REALITY fallback.
+listen: ":443"
+
+# Public host clients dial (baked into emitted tokens). Hostname or IP of this VPS.
+server_addr: "vps.example.com"
+
+# REALITY handshake/camouflage target. Must support TLS 1.3 + HTTP/2 and be
+# reachable from this VPS. To outside observers the tunnel looks like HTTPS to it.
+mimic: "www.microsoft.com:443"
+
+# REALITY keypair + short id (from `tbox gen-keypair`).
+reality_private_key: "REPLACE_ME"
+reality_public_key: "REPLACE_ME"   # optional; derived from private key if omitted
+short_id: "REPLACE_ME"
+
+# Localhost-only internals. The embedded sing-box REALITY inbound binds
+# reality_inbound_addr (fronted by the L4 router); the control plane listens on
+# control_addr (reached by clients over the tunnel).
+control_addr: "127.0.0.1:8443"
+reality_inbound_addr: "127.0.0.1:8444"
+
+log_level: "info"
+
+# Authorized clients. Each gets its own VLESS UUID (== its token).
+clients:
+  - name: "client-1"
+    uuid: "REPLACE_ME"
+  # - name: "client-2"
+  #   uuid: "..."

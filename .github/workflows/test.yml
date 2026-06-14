@@ -1,0 +1,40 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l cmd internal)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-ed:"; echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet -tags with_utls ./...
+
+      - name: build
+        run: go build -tags with_utls ./...
+
+      - name: test
+        # sing-box REALITY needs the with_utls tag. The integration test makes a
+        # real TLS handshake to the mimic host (needs outbound internet on the
+        # runner), which is available on GitHub-hosted runners.
+        run: go test -tags with_utls -race -count=1 ./...

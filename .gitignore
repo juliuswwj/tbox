@@ -1,0 +1,15 @@
+# build output
+/bin/
+/dist/
+
+# local configs / secrets (ship only the *.example.yaml)
+/etc/
+*.key
+*.crt
+*.pem
+server.yaml
+client.yaml
+
+# editor / OS
+*.swp
+.DS_Store

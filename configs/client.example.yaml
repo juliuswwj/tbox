@@ -1,0 +1,55 @@
+# tbox client (runs on the local machine behind the monitored gateway).
+
+# Token from `tbox gen-token -c server.yaml --client <name>` on the server.
+token: "tbox://REPLACE_ME"
+
+# Local SOCKS5H (also SOCKS4/HTTP via the mixed inbound) for forward proxying.
+# Point apps here: curl -x socks5h://127.0.0.1:1080 https://example.com
+socks_listen: "127.0.0.1:1080"
+
+# Local admin API for runtime whitelist changes (used by `tbox whitelist`).
+admin_listen: "127.0.0.1:9090"
+
+log_level: "info"
+
+# Services to publish on the server as HTTPS. TLS is terminated on the server
+# using the cert below; requests are forwarded to the local upstream over the
+# tunnel.
+#
+# Shared domains: multiple clients may publish different path-prefix locations
+# under the SAME domain. One client provides the cert (cert_path/key_path); the
+# others may omit them and just add their location(s). Paths are
+# first-come-first-served across clients. Example: another client could publish
+#   - domain: "app.example.com"   # no cert_path/key_path needed
+#     mode: "http"
+#     routes:
+#       - { path: "/team-b/", upstream: "127.0.0.1:4000", strip_prefix: true }
+publish:
+  # Full-site + sub-location HTTP reverse proxy (nginx-like rewriting).
+  - domain: "app.example.com"
+    cert_path: "/etc/tbox/app.example.com.crt"
+    key_path: "/etc/tbox/app.example.com.key"
+    mode: "http"
+    allow: []                       # source-IP CIDR whitelist; empty = allow all
+    routes:
+      # Sub-location: /api/* on the public site -> local :3000 with /api stripped.
+      - path: "/api/"
+        upstream: "127.0.0.1:3000"
+        strip_prefix: true
+        set_host: "api.internal"
+        request_headers:
+          X-Tbox: "1"
+        response_headers:
+          Server: ""                # delete the upstream Server header
+      # Full site: everything else -> local :8080.
+      - path: "/"
+        upstream: "127.0.0.1:8080"
+
+  # Raw TCP service exposed as a WebSocket under HTTPS.
+  - domain: "ws.example.com"
+    cert_path: "/etc/tbox/ws.example.com.crt"
+    key_path: "/etc/tbox/ws.example.com.key"
+    mode: "ws"
+    allow: ["203.0.113.0/24"]       # only this network may connect
+    path: "/tunnel"                 # public WS path
+    upstream: "127.0.0.1:5000"      # local raw TCP service
