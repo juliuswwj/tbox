@@ -12,6 +12,8 @@ import (
 
 	"github.com/hashicorp/yamux"
 
+	"github.com/juliuswwj/tbox/internal/destallow"
+	"github.com/juliuswwj/tbox/internal/socks5"
 	"github.com/juliuswwj/tbox/internal/tunnel"
 )
 
@@ -29,7 +31,8 @@ type Client struct {
 	services []ServiceReg
 	logger   *log.Logger
 
-	allowedTargets map[string]bool
+	serviceByID map[string]ServiceReg
+	destSets    map[string]*destallow.Set // socks5 service id -> allowed destinations
 
 	mu         sync.Mutex
 	whitelists map[string][]string // service id -> current allow list
@@ -45,22 +48,31 @@ func NewClient(uuid string, certs []CertReg, services []ServiceReg, dial DialFun
 	if logger == nil {
 		logger = log.Default()
 	}
-	targets := make(map[string]bool)
+	byID := make(map[string]ServiceReg)
+	destSets := make(map[string]*destallow.Set)
 	whitelists := make(map[string][]string)
 	for _, s := range services {
-		whitelists[s.ID()] = s.Allow
-		if s.Upstream != "" {
-			targets[s.Upstream] = true
+		id := s.ID()
+		byID[id] = s
+		whitelists[id] = s.Allow
+		if s.Mode == "socks5" {
+			set, err := destallow.New(s.AllowDest)
+			if err != nil {
+				logger.Printf("control: %s: invalid allow_dest, denying all: %v", id, err)
+				set, _ = destallow.New(nil)
+			}
+			destSets[id] = set
 		}
 	}
 	return &Client{
-		uuid:           uuid,
-		dial:           dial,
-		certs:          certs,
-		services:       services,
-		logger:         logger,
-		allowedTargets: targets,
-		whitelists:     whitelists,
+		uuid:        uuid,
+		dial:        dial,
+		certs:       certs,
+		services:    services,
+		logger:      logger,
+		serviceByID: byID,
+		destSets:    destSets,
+		whitelists:  whitelists,
 	}
 }
 
@@ -160,14 +172,23 @@ func (c *Client) handleReverse(stream net.Conn) {
 		_ = stream.Close()
 		return
 	}
-	if !c.allowedTargets[f.Target] {
-		c.logger.Printf("control: refusing reverse stream to unregistered target %q", f.Target)
+	svc, ok := c.serviceByID[f.Service]
+	if !ok {
+		c.logger.Printf("control: refusing reverse stream for unknown service %q", f.Service)
 		_ = stream.Close()
 		return
 	}
-	local, err := net.DialTimeout("tcp", f.Target, 10*time.Second)
+	if svc.Mode == "socks5" {
+		set := c.destSets[f.Service]
+		if err := socks5.Serve(stream, set.Allowed, nil); err != nil {
+			c.logger.Printf("control: socks5 %s: %v", f.Service, err)
+		}
+		return
+	}
+	// http / ws / tcp: dial the service's own upstream and pipe.
+	local, err := net.DialTimeout("tcp", svc.Upstream, 10*time.Second)
 	if err != nil {
-		c.logger.Printf("control: dial local %s: %v", f.Target, err)
+		c.logger.Printf("control: dial local %s for %s: %v", svc.Upstream, f.Service, err)
 		_ = stream.Close()
 		return
 	}

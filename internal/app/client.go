@@ -115,11 +115,12 @@ func buildServices(pubs []config.Publish) ([]control.ServiceReg, error) {
 			return nil, err
 		}
 		svc := control.ServiceReg{
-			Mode:     mode,
-			Host:     host,
-			Path:     path,
-			Upstream: p.Upstream,
-			Allow:    p.Allow,
+			Mode:      mode,
+			Host:      host,
+			Path:      path,
+			Upstream:  p.Upstream,
+			Allow:     p.Allow,
+			AllowDest: p.AllowDest,
 		}
 		if mode == "http" {
 			svc.StripPrefix = p.StripPrefix

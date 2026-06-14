@@ -1,7 +1,9 @@
 // Package tunnel carries the reverse-tunnel multiplexing over a single
 // VLESS-REALITY carrier connection. The server opens yamux streams toward the
-// client; each stream begins with a small frame naming the local target the
-// client should dial.
+// client; each stream begins with a small frame naming the service the stream
+// belongs to. The client resolves what to do (dial an upstream, run a SOCKS5
+// server, …) from its own configuration for that service id — it never trusts a
+// server-provided destination.
 package tunnel
 
 import (
@@ -10,21 +12,11 @@ import (
 	"io"
 )
 
-// Mode identifies how the server is using a reverse stream (informational for
-// the client, which always just dials Target and pipes bytes).
-type Mode string
-
-const (
-	ModeHTTP Mode = "http" // server runs an HTTP reverse proxy over the stream
-	ModeTCP  Mode = "tcp"  // server bridges a WebSocket (or raw TCP) over the stream
-)
-
 // Frame is the stream header written by the server when opening a reverse
-// stream. Target is the local upstream the client must connect to; the client
-// validates Target against the set it registered.
+// stream. Service is the canonical service id (e.g. "https://app.example.com/x/"
+// or "tcp://ssh.example.com").
 type Frame struct {
-	Mode   Mode   `json:"mode"`
-	Target string `json:"target"`
+	Service string `json:"service"`
 }
 
 const maxFrameLen = 64 * 1024

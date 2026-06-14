@@ -99,7 +99,7 @@ func TestServerCertWithClientServices(t *testing.T) {
 	if got := len(reg.HTTPServices("app.dc.example.com")); got != 2 {
 		t.Fatalf("app.dc.example.com should have 2 http/ws services, got %d", got)
 	}
-	if _, ok := reg.TCPService("ssh.dc.example.com"); !ok {
+	if _, ok := reg.RawService("ssh.dc.example.com"); !ok {
 		t.Fatal("tcp service missing")
 	}
 	// The server-provided wildcard cert serves all of them.
@@ -136,7 +136,7 @@ func TestPerServiceWhitelistAndRemoval(t *testing.T) {
 	reg.Register("A", sA, nil, []ServiceReg{
 		{Mode: "tcp", Host: "ssh.example.com", Upstream: "127.0.0.1:22", Allow: []string{"203.0.113.0/24"}},
 	})
-	svc, ok := reg.TCPService("ssh.example.com")
+	svc, ok := reg.RawService("ssh.example.com")
 	if !ok {
 		t.Fatal("missing tcp service")
 	}
@@ -159,7 +159,7 @@ func TestPerServiceWhitelistAndRemoval(t *testing.T) {
 	}
 	// Session removal drops the service.
 	reg.RemoveSession(sA)
-	if _, ok := reg.TCPService("ssh.example.com"); ok {
+	if _, ok := reg.RawService("ssh.example.com"); ok {
 		t.Fatal("service should be gone after session removal")
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"net/http/httputil"
 
 	"github.com/juliuswwj/tbox/internal/control"
-	"github.com/juliuswwj/tbox/internal/tunnel"
 )
 
 // newReverseProxy builds a ReverseProxy whose transport dials a fresh reverse
@@ -15,7 +14,7 @@ import (
 func newReverseProxy(svc *control.Service, logger Logger) *httputil.ReverseProxy {
 	transport := &http.Transport{
 		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-			return svc.OpenStream(tunnel.ModeHTTP, svc.Upstream)
+			return svc.OpenStream()
 		},
 		// Each request dials a brand-new reverse stream; pooling across the
 		// shared yamux session buys little and complicates lifetime, so disable it.

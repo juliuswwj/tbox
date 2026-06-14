@@ -40,18 +40,21 @@ type Service struct {
 func (s *Service) ID() string { return ServiceID(s.Mode, s.Host, s.Path) }
 
 // OpenStream opens a reverse stream to the owning client and writes the frame
-// naming the local target the client must dial.
-func (s *Service) OpenStream(mode tunnel.Mode, target string) (net.Conn, error) {
+// naming this service. The client resolves what to do from its own config.
+func (s *Service) OpenStream() (net.Conn, error) {
 	stream, err := s.Session.OpenStream()
 	if err != nil {
 		return nil, fmt.Errorf("open reverse stream: %w", err)
 	}
-	if err := tunnel.WriteFrame(stream, tunnel.Frame{Mode: mode, Target: target}); err != nil {
+	if err := tunnel.WriteFrame(stream, tunnel.Frame{Service: s.ID()}); err != nil {
 		_ = stream.Close()
 		return nil, err
 	}
 	return stream, nil
 }
+
+// isRaw reports whether a mode is a whole-host, TLS-terminate-then-raw service.
+func isRaw(mode string) bool { return mode == "tcp" || mode == "socks5" }
 
 type parsedCert struct {
 	cert     tls.Certificate
@@ -66,14 +69,14 @@ type parsedCert struct {
 type Registry struct {
 	mu      sync.RWMutex
 	certs   []*parsedCert
-	tcp     map[string]*Service   // host -> tcp service
+	raw     map[string]*Service   // host -> whole-host tcp/socks5 service
 	http    map[string][]*Service // host -> http/ws services
 	version atomic.Uint64
 }
 
 // NewRegistry creates an empty registry.
 func NewRegistry() *Registry {
-	return &Registry{tcp: make(map[string]*Service), http: make(map[string][]*Service)}
+	return &Registry{raw: make(map[string]*Service), http: make(map[string][]*Service)}
 }
 
 // Version changes whenever certs/services change; used to invalidate caches.
@@ -157,7 +160,7 @@ func (r *Registry) Register(clientID string, sess *yamux.Session, certs []CertRe
 		}
 		host := strings.ToLower(sr.Host)
 		path := ""
-		if sr.Mode != "tcp" {
+		if !isRaw(sr.Mode) {
 			path = normPath(sr.Path)
 		}
 		svcs = append(svcs, &Service{
@@ -176,17 +179,17 @@ func (r *Registry) Register(clientID string, sess *yamux.Session, certs []CertRe
 
 	// Conflict checks against other clients' remaining services.
 	for _, s := range svcs {
-		switch s.Mode {
-		case "tcp":
-			if ex, ok := r.tcp[s.Host]; ok && ex.ClientID != clientID {
-				return fmt.Errorf("host %s already used as tcp by another client", s.Host)
+		switch {
+		case isRaw(s.Mode):
+			if ex, ok := r.raw[s.Host]; ok && ex.ClientID != clientID {
+				return fmt.Errorf("host %s already used (%s) by another client", s.Host, ex.Mode)
 			}
 			if len(r.http[s.Host]) > 0 {
-				return fmt.Errorf("host %s already used for http/ws; cannot also be tcp", s.Host)
+				return fmt.Errorf("host %s already used for http/ws; cannot also be %s", s.Host, s.Mode)
 			}
-		case "http", "ws":
-			if _, ok := r.tcp[s.Host]; ok {
-				return fmt.Errorf("host %s already used as tcp; cannot also serve http/ws", s.Host)
+		case s.Mode == "http" || s.Mode == "ws":
+			if ex, ok := r.raw[s.Host]; ok {
+				return fmt.Errorf("host %s already used as %s; cannot also serve http/ws", s.Host, ex.Mode)
 			}
 			for _, ex := range r.http[s.Host] {
 				if samePath(ex.Path, s.Path) {
@@ -201,8 +204,8 @@ func (r *Registry) Register(clientID string, sess *yamux.Session, certs []CertRe
 	// Commit.
 	r.certs = append(r.certs, pcs...)
 	for _, s := range svcs {
-		if s.Mode == "tcp" {
-			r.tcp[s.Host] = s
+		if isRaw(s.Mode) {
+			r.raw[s.Host] = s
 		} else {
 			r.http[s.Host] = append(r.http[s.Host], s)
 		}
@@ -214,9 +217,9 @@ func (r *Registry) Register(clientID string, sess *yamux.Session, certs []CertRe
 // removeClientLocked drops all certs/services owned by clientID (caller holds mu).
 func (r *Registry) removeClientLocked(clientID string) {
 	r.certs = filterCerts(r.certs, func(pc *parsedCert) bool { return pc.clientID != clientID })
-	for host, s := range r.tcp {
+	for host, s := range r.raw {
 		if s.ClientID == clientID {
-			delete(r.tcp, host)
+			delete(r.raw, host)
 		}
 	}
 	for host, list := range r.http {
@@ -253,7 +256,7 @@ func (r *Registry) UpdateWhitelist(clientID, serviceID string, allow []string) e
 }
 
 func (r *Registry) findServiceLocked(serviceID string) *Service {
-	for _, s := range r.tcp {
+	for _, s := range r.raw {
 		if s.ID() == serviceID {
 			return s
 		}
@@ -268,11 +271,11 @@ func (r *Registry) findServiceLocked(serviceID string) *Service {
 	return nil
 }
 
-// TCPService returns the tcp service for a host.
-func (r *Registry) TCPService(host string) (*Service, bool) {
+// RawService returns the whole-host tcp/socks5 service for a host.
+func (r *Registry) RawService(host string) (*Service, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	s, ok := r.tcp[strings.ToLower(host)]
+	s, ok := r.raw[strings.ToLower(host)]
 	return s, ok
 }
 
@@ -322,9 +325,9 @@ func (r *Registry) RemoveSession(sess *yamux.Session) []string {
 	before := len(r.certs)
 	r.certs = filterCerts(r.certs, func(pc *parsedCert) bool { return pc.session != sess })
 	changed := len(r.certs) != before
-	for host, s := range r.tcp {
+	for host, s := range r.raw {
 		if s.Session == sess {
-			delete(r.tcp, host)
+			delete(r.raw, host)
 			affected = append(affected, s.ID())
 			changed = true
 		}

@@ -12,6 +12,8 @@ import (
 	"strconv"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/juliuswwj/tbox/internal/destallow"
 )
 
 // CertFile points at a TLS certificate + key on disk. The covered domain names
@@ -78,7 +80,10 @@ type Publish struct {
 	Upstream string   `yaml:"upstream"`
 	Allow    []string `yaml:"allow"` // source-IP whitelist (CIDRs); empty = allow all
 
-	// HTTP mode rewriting (ignored for ws/tcp):
+	// socks5 mode: allowed CONNECT destinations (empty = deny all).
+	AllowDest []string `yaml:"allow_dest"`
+
+	// HTTP mode rewriting (ignored for ws/tcp/socks5):
 	StripPrefix     bool              `yaml:"strip_prefix"`
 	AddPrefix       string            `yaml:"add_prefix"`
 	SetHost         string            `yaml:"set_host"`
@@ -103,13 +108,15 @@ func (p Publish) Parse() (mode, host, path string, err error) {
 		mode = "ws"
 	case "tcp", "tls":
 		mode = "tcp"
+	case "socks5", "socks":
+		mode = "socks5"
 	default:
-		return "", "", "", fmt.Errorf("url %q: unsupported scheme (use https/wss/tcp)", p.URL)
+		return "", "", "", fmt.Errorf("url %q: unsupported scheme (use https/wss/tcp/socks5)", p.URL)
 	}
 	path = u.Path
-	if mode == "tcp" {
+	if mode == "tcp" || mode == "socks5" {
 		if path != "" && path != "/" {
-			return "", "", "", fmt.Errorf("url %q: tcp services cover a whole host and must not have a path", p.URL)
+			return "", "", "", fmt.Errorf("url %q: %s services cover a whole host and must not have a path", p.URL, mode)
 		}
 		path = ""
 	} else if path == "" {
@@ -168,10 +175,15 @@ func LoadClient(path string) (*ClientConfig, error) {
 	}
 	for i := range c.Publish {
 		p := &c.Publish[i]
-		if _, _, _, err := p.Parse(); err != nil {
+		mode, _, _, err := p.Parse()
+		if err != nil {
 			return nil, fmt.Errorf("publish[%d]: %w", i, err)
 		}
-		if p.Upstream == "" {
+		if mode == "socks5" {
+			if _, err := destallow.New(p.AllowDest); err != nil {
+				return nil, fmt.Errorf("publish[%d] (%s): %w", i, p.URL, err)
+			}
+		} else if p.Upstream == "" {
 			return nil, fmt.Errorf("publish[%d] (%s): upstream is required", i, p.URL)
 		}
 	}

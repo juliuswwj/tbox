@@ -12,7 +12,10 @@ HTTPS traffic to a real site (e.g. `www.microsoft.com`):
      with nginx-style URL/header rewriting;
    - `wss://host/path` — a raw **TCP** service as a **WebSocket**;
    - `tcp://host` — a raw **TCP** service as **TLS+TCP** (TLS terminated by SNI,
-     then piped raw — e.g. ssh).
+     then piped raw — e.g. ssh);
+   - `socks5://host` — a restricted **SOCKS5** proxy where the client is the
+     SOCKS5 server and only dials destinations on an `allow_dest` list (so it is
+     never an open proxy).
 
    These coexist under one certificate, e.g. all of `https://dc.example.com/`,
    `https://app.dc.example.com/location/`, `wss://app.dc.example.com/tunnel/ssh`,
@@ -33,8 +36,9 @@ HTTPS traffic to a real site (e.g. `www.microsoft.com`):
 ## How it works
 
 - The **server** owns `:443` with an L4 SNI router. By SNI host:
-  - a **tcp service** → TLS terminated on the VPS, then raw-piped to the owning
-    client (TLS+TCP);
+  - a **tcp / socks5 service** → TLS terminated on the VPS, then raw-piped to the
+    owning client (which dials the upstream, or runs a SOCKS5 server enforcing
+    `allow_dest`);
   - a host with **http/ws services** → handed to the publish HTTP server, which
     terminates TLS (cert chosen by SNI) and dispatches by path;
   - the **mimic** host (and unknown/empty SNI, probes) → embedded sing-box

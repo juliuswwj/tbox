@@ -96,6 +96,7 @@ func TestEndToEnd(t *testing.T) {
 	originTeamB := startOrigin(t, "Bsub") // https://app.dc.example.com/teamb/ (client B)
 	echoWS := startEchoTCP(t)             // wss://app.dc.example.com/tunnel/ssh
 	echoTCP := startEchoTCP(t)            // tcp://ssh.dc.example.com
+	echoDest := startEchoTCP(t)           // allowed CONNECT target for socks5://proxy.dc.example.com
 
 	// --- client A: apex http, sub-location http (rewrite), ws, and tcp ---
 	socksA := fmt.Sprintf("127.0.0.1:%d", freePort(t))
@@ -105,6 +106,7 @@ func TestEndToEnd(t *testing.T) {
 			StripPrefix: true, SetHost: "app.internal", RequestHeaders: map[string]string{"X-Test": "hello"}},
 		{Mode: "ws", Host: "app.dc.example.com", Path: "/tunnel/ssh", Upstream: echoWS},
 		{Mode: "tcp", Host: "ssh.dc.example.com", Upstream: echoTCP, Allow: []string{"203.0.113.0/24"}},
+		{Mode: "socks5", Host: "proxy.dc.example.com", AllowDest: []string{echoDest}},
 	}
 	ccA := startClient(t, socksA, publicAddr, uuidA, kp.PublicKey, shortID, ctrlAddr, nil, servicesA, logger)
 
@@ -118,7 +120,8 @@ func TestEndToEnd(t *testing.T) {
 	waitFor(t, func() bool {
 		return reg.HasHTTPHost("dc.example.com") &&
 			len(reg.HTTPServices("app.dc.example.com")) >= 3 &&
-			tcpExists(reg, "ssh.dc.example.com")
+			rawExists(reg, "ssh.dc.example.com") &&
+			rawExists(reg, "proxy.dc.example.com")
 	})
 
 	t.Run("forward-socks5h", func(t *testing.T) {
@@ -172,6 +175,19 @@ func TestEndToEnd(t *testing.T) {
 		must(t, err)
 		if got != "hello-ssh" {
 			t.Fatalf("tcp echo = %q, want %q", got, "hello-ssh")
+		}
+	})
+
+	t.Run("socks5-with-allowlist", func(t *testing.T) {
+		// Allowed destination -> CONNECT succeeds and echoes.
+		got, err := socks5ViaTLS(publicAddr, "proxy.dc.example.com", echoDest, "via-socks")
+		must(t, err)
+		if got != "via-socks" {
+			t.Fatalf("socks5 echo = %q, want %q", got, "via-socks")
+		}
+		// Destination not on the allow list -> refused by the client.
+		if _, err := socks5ViaTLS(publicAddr, "proxy.dc.example.com", "127.0.0.1:9", "x"); err == nil {
+			t.Fatal("expected disallowed destination to be refused")
 		}
 	})
 }
@@ -260,9 +276,53 @@ func waitFor(t *testing.T, cond func() bool) {
 	t.Fatal("condition not met in time")
 }
 
-func tcpExists(reg *control.Registry, host string) bool {
-	_, ok := reg.TCPService(host)
+func rawExists(reg *control.Registry, host string) bool {
+	_, ok := reg.RawService(host)
 	return ok
+}
+
+// socks5ViaTLS connects to the public router with the given SNI (a published
+// socks5 service), then uses SOCKS5 to CONNECT to dest, writes msg, and reads
+// the echo back. The SOCKS5 client runs over the TLS conn to the router.
+func socks5ViaTLS(publicAddr, sni, dest, msg string) (string, error) {
+	base := tlsDialer{publicAddr: publicAddr, sni: sni}
+	d, err := proxy.SOCKS5("tcp", sni+":443", nil, base)
+	if err != nil {
+		return "", err
+	}
+	conn, err := d.Dial("tcp", dest)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte(msg)); err != nil {
+		return "", err
+	}
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		return "", err
+	}
+	return string(buf), nil
+}
+
+// tlsDialer dials the public router and wraps the conn in TLS with a fixed SNI,
+// so x/net/proxy's SOCKS5 client speaks SOCKS5 over it.
+type tlsDialer struct {
+	publicAddr string
+	sni        string
+}
+
+func (d tlsDialer) Dial(_, _ string) (net.Conn, error) {
+	raw, err := net.DialTimeout("tcp", d.publicAddr, 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	c := tls.Client(raw, &tls.Config{ServerName: d.sni, InsecureSkipVerify: true})
+	if err := c.Handshake(); err != nil {
+		raw.Close()
+		return nil, err
+	}
+	return c, nil
 }
 
 func startOrigin(t *testing.T, label string) string {

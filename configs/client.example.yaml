@@ -46,3 +46,12 @@ publish:
   - url: "tcp://ssh.dc.example.com"
     upstream: "127.0.0.1:22"
     allow: ["203.0.113.0/24"]     # source-IP whitelist (empty = allow all)
+
+  # A restricted SOCKS5 proxy: the client is the SOCKS5 server and only dials
+  # destinations on allow_dest (so it is NOT an open proxy). No upstream.
+  - url: "socks5://proxy.dc.example.com"
+    allow: ["203.0.113.0/24"]     # who may connect (source IP)
+    allow_dest:                   # where they may connect to (empty = deny all)
+      - "10.0.0.0/8"              #   any IP in the internal range
+      - "*.internal.example.com"  #   any host under this domain
+      - "git.example.com:22"      #   one host:port

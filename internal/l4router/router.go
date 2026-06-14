@@ -103,8 +103,8 @@ func (r *Router) handle(conn net.Conn) {
 	}
 	host := strings.ToLower(strings.TrimSpace(sni))
 
-	if svc, ok := r.reg.TCPService(host); ok {
-		r.handleTCP(svc, replayed, conn.RemoteAddr())
+	if svc, ok := r.reg.RawService(host); ok {
+		r.handleRaw(svc, replayed, conn.RemoteAddr())
 		return
 	}
 	if r.reg.HasHTTPHost(host) {
@@ -120,17 +120,18 @@ func (r *Router) handle(conn net.Conn) {
 	r.toReality(replayed)
 }
 
-// handleTCP terminates TLS for a whole-host tcp service and raw-pipes the
-// decrypted stream to the owning client.
-func (r *Router) handleTCP(svc *control.Service, conn net.Conn, remote net.Addr) {
+// handleRaw terminates TLS for a whole-host tcp/socks5 service and raw-pipes the
+// decrypted stream to the owning client (which dials the upstream or runs a
+// SOCKS5 server).
+func (r *Router) handleRaw(svc *control.Service, conn net.Conn, remote net.Addr) {
 	if !svc.Allow.AllowedConn(remote) {
-		r.logger.Printf("l4: blocked %s -> tcp://%s (not in whitelist)", remote, svc.Host)
+		r.logger.Printf("l4: blocked %s -> %s (not in whitelist)", remote, svc.ID())
 		_ = conn.Close()
 		return
 	}
 	cert, ok := r.reg.LookupCert(svc.Host)
 	if !ok {
-		r.logger.Printf("l4: no certificate for tcp://%s", svc.Host)
+		r.logger.Printf("l4: no certificate for %s", svc.ID())
 		_ = conn.Close()
 		return
 	}
@@ -145,9 +146,9 @@ func (r *Router) handleTCP(svc *control.Service, conn net.Conn, remote net.Addr)
 	}
 	_ = tlsConn.SetDeadline(time.Time{})
 
-	stream, err := svc.OpenStream(tunnel.ModeTCP, svc.Upstream)
+	stream, err := svc.OpenStream()
 	if err != nil {
-		r.logger.Printf("l4: tcp://%s open stream to %s: %v", svc.Host, svc.Upstream, err)
+		r.logger.Printf("l4: %s open reverse stream: %v", svc.ID(), err)
 		_ = tlsConn.Close()
 		return
 	}

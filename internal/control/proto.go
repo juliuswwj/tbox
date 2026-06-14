@@ -45,11 +45,14 @@ type CertReg struct {
 
 // ServiceReg is one published service registered by a client.
 type ServiceReg struct {
-	Mode     string   `json:"mode"` // http | ws | tcp
+	Mode     string   `json:"mode"` // http | ws | tcp | socks5
 	Host     string   `json:"host"`
-	Path     string   `json:"path,omitempty"` // http/ws only
-	Upstream string   `json:"upstream"`
-	Allow    []string `json:"allow,omitempty"`
+	Path     string   `json:"path,omitempty"`     // http/ws only
+	Upstream string   `json:"upstream,omitempty"` // http/ws/tcp only
+	Allow    []string `json:"allow,omitempty"`    // source-IP whitelist
+
+	// socks5 only: allowed CONNECT destinations (empty denies all).
+	AllowDest []string `json:"allow_dest,omitempty"`
 
 	// http rewrite
 	StripPrefix     bool              `json:"strip_prefix,omitempty"`
@@ -67,6 +70,8 @@ func ServiceID(mode, host, path string) string {
 	switch mode {
 	case "tcp":
 		return "tcp://" + host
+	case "socks5":
+		return "socks5://" + host
 	case "ws":
 		return "wss://" + host + normPath(path)
 	default:
