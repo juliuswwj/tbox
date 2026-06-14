@@ -68,6 +68,51 @@ sudo journalctl -u tbox-client -f
 - `tbox whitelist -c /etc/tbox/client.yaml ...` talks to the client's local
   admin port and can be run by hand while the service is active.
 
+## Let's Encrypt certificates (client)
+
+The published domain's cert/key live on the **client** (it uploads them to the
+server over the tunnel). Point `client.yaml` at them:
+
+```yaml
+publish:
+  - domain: "app.example.com"
+    cert_path: "/etc/tbox/app.example.com.crt"
+    key_path:  "/etc/tbox/app.example.com.key"
+    mode: "http"
+    routes:
+      - { path: "/", upstream: "127.0.0.1:8080" }
+```
+
+Two wrinkles with certbot's output:
+
+1. **Permissions** — `/etc/letsencrypt/{live,archive}` are `0700 root`, so the
+   unprivileged `tbox` user can't read `privkey.pem`.
+2. **Renewal** — tbox reads the cert once at startup (and re-sends the same PEM
+   on reconnect), so a renewed cert is only picked up after a restart.
+
+The shipped deploy hook solves both: it copies each renewed cert/key into
+`/etc/tbox` as `root:tbox 0640` and restarts the client.
+
+```sh
+sudo install -m 0755 deploy/letsencrypt-deploy-hook.sh \
+     /etc/letsencrypt/renewal-hooks/deploy/tbox.sh
+
+# initial issuance (also runs the hook so /etc/tbox/<domain>.{crt,key} appear):
+sudo certbot certonly --standalone -d app.example.com \
+     --deploy-hook /etc/letsencrypt/renewal-hooks/deploy/tbox.sh
+```
+
+It writes `/etc/tbox/<domain>.crt` (fullchain) and `/etc/tbox/<domain>.key`
+(privkey) — set `cert_path`/`key_path` in `client.yaml` to match. Renewals then
+refresh those files and restart `tbox-client` automatically.
+
+> Alternatives: run `tbox-client` as root (drop `User=tbox` and add a
+> `ReadWritePaths=`/`ReadOnlyPaths=/etc/letsencrypt` drop-in), or grant the
+> `tbox` user an ACL on the LE dirs (`setfacl -Rm u:tbox:rX /etc/letsencrypt/{live,archive}`)
+> — but certbot can reset those perms on renewal, so the copy hook is the
+> sturdiest. Either way, if your certs stay outside `/etc/tbox`, add a
+> `ReadOnlyPaths=` drop-in for that path because `ProtectSystem=strict` is set.
+
 ## Troubleshooting
 
 - **`start sing-box: address family not supported by protocol`** — the unit's
