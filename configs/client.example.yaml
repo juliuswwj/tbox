@@ -55,3 +55,17 @@ publish:
       - "10.0.0.0/8"              #   any IP in the internal range
       - "*.internal.example.com"  #   any host under this domain
       - "git.example.com:22"      #   one host:port
+
+# OPTIONAL: L2 tunnel leaf. Enable at least one of `tap` (make this client a
+# node on the virtual segment) or `udp` (let unmodified udpt.py clients join
+# over a local UDP socket). Requires CAP_NET_ADMIN when `tap` is used.
+# tun:
+#   enable: true
+#   accept_default_route: false    # route all traffic via the tunnel (with tap)
+#   mtu: 1448
+#   tap:                           # native TAP on this host
+#     name: "tbox0"
+#     # ipv4_cidr: "10.42.0.9/24"  # omit to use the server-assigned address
+#     # ipv6: "2001:db8:0:42::9/80"
+#   udp:                           # udpt.py entrypoint: run `udpt.py --target 127.0.0.1:3390 --ip ...`
+#     listen: "127.0.0.1:3390"

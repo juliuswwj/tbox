@@ -8,6 +8,8 @@ import (
 	"net"
 	"strings"
 
+	"github.com/hashicorp/yamux"
+
 	"github.com/juliuswwj/tbox/internal/tunnel"
 )
 
@@ -17,15 +19,17 @@ import (
 type Server struct {
 	reg          *Registry
 	allowedUUIDs map[string]string // uuid -> client name
+	hub          *TunHub           // optional L2 tunnel hub (nil = disabled)
 	logger       *log.Logger
 }
 
-// NewServer creates a control server. clients maps uuid -> name.
-func NewServer(reg *Registry, clients map[string]string, logger *log.Logger) *Server {
+// NewServer creates a control server. clients maps uuid -> name. hub may be nil
+// to disable the L2 tunnel data plane.
+func NewServer(reg *Registry, clients map[string]string, hub *TunHub, logger *log.Logger) *Server {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Server{reg: reg, allowedUUIDs: clients, logger: logger}
+	return &Server{reg: reg, allowedUUIDs: clients, hub: hub, logger: logger}
 }
 
 // Serve accepts connections until the listener is closed.
@@ -60,6 +64,12 @@ func (s *Server) handleSession(conn net.Conn) {
 		return
 	}
 
+	// After auth, additional client-opened streams (the L2 tunnel data stream)
+	// are accepted and dispatched here. The loop is gated on authed so the
+	// client id is known before any data stream is wired into the hub.
+	authed := make(chan string, 1)
+	go s.acceptDataStreams(sess, authed)
+
 	dec := json.NewDecoder(control)
 	enc := json.NewEncoder(control)
 
@@ -87,6 +97,10 @@ func (s *Server) handleSession(conn net.Conn) {
 			}
 			clientID = msg.UUID
 			s.logger.Printf("control: client %q (%s) authenticated", name, shortID(clientID))
+			select {
+			case authed <- clientID:
+			default:
+			}
 			_ = enc.Encode(ack(true, ""))
 
 		case TypeRegister:
@@ -100,7 +114,11 @@ func (s *Server) handleSession(conn net.Conn) {
 			}
 			s.logger.Printf("control: client %s registered %d cert(s), services: %s",
 				shortID(clientID), len(msg.Certs), strings.Join(ids, ", "))
-			_ = enc.Encode(ack(true, ""))
+			resp := ack(true, "")
+			if s.hub != nil {
+				resp.Tun = s.hub.Assign(clientID)
+			}
+			_ = enc.Encode(resp)
 
 		case TypeUpdateWhitelist:
 			if err := s.reg.UpdateWhitelist(clientID, msg.ServiceID, msg.Allow); err != nil {
@@ -117,6 +135,38 @@ func (s *Server) handleSession(conn net.Conn) {
 			_ = enc.Encode(ack(false, "unknown message type"))
 		}
 	}
+}
+
+// acceptDataStreams waits for the client to authenticate, then accepts any
+// further client-opened streams and dispatches them (currently only the L2
+// tunnel data stream). It returns when the session closes.
+func (s *Server) acceptDataStreams(sess *yamux.Session, authed <-chan string) {
+	clientID, ok := <-authed
+	if !ok {
+		return
+	}
+	for {
+		stream, err := sess.AcceptStream()
+		if err != nil {
+			return
+		}
+		go s.handleDataStream(clientID, stream)
+	}
+}
+
+func (s *Server) handleDataStream(clientID string, stream net.Conn) {
+	f, err := tunnel.ReadFrame(stream)
+	if err != nil {
+		_ = stream.Close()
+		return
+	}
+	if f.Service != TunService || s.hub == nil {
+		s.logger.Printf("control: client %s opened unexpected stream %q", shortID(clientID), f.Service)
+		_ = stream.Close()
+		return
+	}
+	s.hub.ServeClient(clientID, stream)
+	_ = stream.Close()
 }
 
 func shortID(uuid string) string {

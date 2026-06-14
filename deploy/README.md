@@ -70,6 +70,31 @@ sudo journalctl -u tbox-client -f
 - `tbox whitelist -c /etc/tbox/client.yaml ...` talks to the client's local
   admin port and can be run by hand while the service is active.
 
+### Enabling the L2 tunnel (TAP)
+
+The shipped units are hardened for the publishing/proxy roles and intentionally
+**cannot** create a TAP device, write sysctls, or add iptables rules. When you
+turn on the L2 tunnel (`tun.enable` with a native `tap`, NAT, or passthrough),
+add a drop-in that relaxes exactly what the data plane needs. Server example
+(`sudo systemctl edit tbox-server`):
+
+```ini
+[Service]
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
+PrivateDevices=no                 # allow /dev/net/tun
+ProtectKernelTunables=no          # allow net.ipv4.ip_forward (enable_nat)
+DeviceAllow=/dev/net/tun rw
+```
+
+A client that uses a native `tap` or `accept_default_route` needs the same
+`CAP_NET_ADMIN` + `PrivateDevices=no` + `DeviceAllow=/dev/net/tun rw`. A client
+that only exposes a `udp:` endpoint for `udpt.py` needs none of this — the udpt
+process owns its own TAP. IPv6 passthrough additionally needs `ndppd` installed
+and configured for the pool prefix; tbox calls `systemctl restart ndppd`, which
+requires the unit to be able to run that (drop `NoNewPrivileges` or grant the
+specific polkit/sudo rule per your policy).
+
 ## Let's Encrypt certificates
 
 The cert's domain names are read from its SAN, so one cert (incl. a wildcard)

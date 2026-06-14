@@ -42,3 +42,18 @@ clients:
 # certs:
 #   - cert_path: "/etc/tbox/dc.example.com.crt"   # SAN: dc.example.com, *.dc.example.com
 #     key_path:  "/etc/tbox/dc.example.com.key"
+
+# OPTIONAL: L2 tunnel hub (absorbs the udpt.py bridge as a native Go switch).
+# The server creates a TAP device and acts as a learning bridge whose ports are
+# each client's carrier stream plus this local TAP. Requires CAP_NET_ADMIN.
+# tun:
+#   enable: true
+#   tap_name: "tbox0"
+#   pool_v4: "10.42.0.0/24"        # virtual subnet; gateway defaults to .1
+#   # gateway: "10.42.0.1"
+#   mtu: 1448
+#   enable_nat: true               # MASQUERADE pool_v4 for global egress
+#   wan_interface: "eth0"          # required when enable_nat
+#   # bridge: "br0"                # optional: enslave the TAP to a bridge
+#   enable_passthrough: true       # IPv6: add /80 routes + restart ndppd
+#   # ipv6_prefix: "2001:db8:0:42::/80"

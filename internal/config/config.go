@@ -46,12 +46,53 @@ type ServerConfig struct {
 	// Certs are TLS certificates the server provides for published domains, so
 	// clients need not ship their own (avoids client-side cert dependencies).
 	Certs []CertFile `yaml:"certs"`
+	// Tun enables the L2 (TAP) tunnel data plane on the server (the hub).
+	Tun ServerTun `yaml:"tun"`
 }
 
 // ClientCred is a single authorized client (one VLESS user).
 type ClientCred struct {
 	Name string `yaml:"name"`
 	UUID string `yaml:"uuid"`
+}
+
+// ServerTun configures the server-side L2 tunnel hub: a TAP device on the VPS,
+// MAC-learning forwarding across client carrier streams, optional NAT egress
+// for the v4 pool, and optional IPv6 transparent passthrough via ndppd.
+type ServerTun struct {
+	Enable            bool   `yaml:"enable"`
+	TapName           string `yaml:"tap_name"`           // default tbox0
+	PoolV4            string `yaml:"pool_v4"`            // e.g. 10.42.0.0/24
+	Gateway           string `yaml:"gateway"`            // default: first host of pool
+	IPv6Prefix        string `yaml:"ipv6_prefix"`        // optional, e.g. 2001:db8::/80
+	MTU               int    `yaml:"mtu"`                // default 1448
+	EnableNAT         bool   `yaml:"enable_nat"`         // MASQUERADE pool_v4 out wan_interface
+	WANInterface      string `yaml:"wan_interface"`      // required when enable_nat
+	Bridge            string `yaml:"bridge"`             // optional: enslave TAP to a bridge
+	EnablePassthrough bool   `yaml:"enable_passthrough"` // IPv6 /80 routes + ndppd
+}
+
+// ClientTunTAP optionally makes the client itself a node on the L2 segment.
+type ClientTunTAP struct {
+	Name     string `yaml:"name"`      // default tbox0
+	IPv4CIDR string `yaml:"ipv4_cidr"` // optional manual address (else server-assigned)
+	IPv6     string `yaml:"ipv6"`      // optional manual address
+}
+
+// ClientTunUDP optionally exposes a local UDP socket so external udpt.py
+// clients can join the tunnel's L2 segment unmodified.
+type ClientTunUDP struct {
+	Listen string `yaml:"listen"` // e.g. 127.0.0.1:3390
+}
+
+// ClientTun configures the client-side L2 tunnel leaf. At least one of TAP or
+// UDP must be set when Enable is true.
+type ClientTun struct {
+	Enable             bool          `yaml:"enable"`
+	TAP                *ClientTunTAP `yaml:"tap"`
+	UDP                *ClientTunUDP `yaml:"udp"`
+	AcceptDefaultRoute bool          `yaml:"accept_default_route"`
+	MTU                int           `yaml:"mtu"` // default 1448
 }
 
 // ClientConfig is the local-side configuration.
@@ -64,6 +105,8 @@ type ClientConfig struct {
 	// provide the cert instead).
 	Certs   []CertFile `yaml:"certs"`
 	Publish []Publish  `yaml:"publish"`
+	// Tun enables the L2 (TAP) tunnel data plane on the client (a leaf).
+	Tun ClientTun `yaml:"tun"`
 }
 
 // Publish describes one local service exposed via the server. The service is
@@ -152,7 +195,63 @@ func LoadServer(path string) (*ServerConfig, error) {
 	if len(c.Clients) == 0 {
 		return nil, fmt.Errorf("at least one client is required")
 	}
+	if c.Tun.Enable {
+		if err := validateServerTun(&c.Tun); err != nil {
+			return nil, fmt.Errorf("tun: %w", err)
+		}
+	}
 	return &c, nil
+}
+
+// validateServerTun fills defaults and validates the server tun block.
+func validateServerTun(t *ServerTun) error {
+	if t.TapName == "" {
+		t.TapName = "tbox0"
+	}
+	if t.MTU == 0 {
+		t.MTU = 1448
+	}
+	if t.PoolV4 == "" {
+		return fmt.Errorf("pool_v4 is required")
+	}
+	_, ipnet, err := net.ParseCIDR(t.PoolV4)
+	if err != nil {
+		return fmt.Errorf("invalid pool_v4 %q: %w", t.PoolV4, err)
+	}
+	if t.Gateway == "" {
+		gw := firstHost(ipnet)
+		if gw == nil {
+			return fmt.Errorf("cannot derive gateway from pool_v4 %q", t.PoolV4)
+		}
+		t.Gateway = gw.String()
+	} else if net.ParseIP(t.Gateway) == nil {
+		return fmt.Errorf("invalid gateway %q", t.Gateway)
+	}
+	if t.IPv6Prefix != "" {
+		if _, _, err := net.ParseCIDR(t.IPv6Prefix); err != nil {
+			return fmt.Errorf("invalid ipv6_prefix %q: %w", t.IPv6Prefix, err)
+		}
+	}
+	if t.EnableNAT && t.WANInterface == "" {
+		return fmt.Errorf("wan_interface is required when enable_nat is set")
+	}
+	return nil
+}
+
+// firstHost returns the first usable host address of an IPv4 network (network
+// address + 1), used as the default tunnel gateway.
+func firstHost(ipnet *net.IPNet) net.IP {
+	ip := ipnet.IP.To4()
+	if ip == nil {
+		return nil
+	}
+	host := make(net.IP, len(ip))
+	copy(host, ip)
+	host[3]++
+	if !ipnet.Contains(host) {
+		return nil
+	}
+	return host
 }
 
 // LoadClient reads and validates a client config file.
@@ -185,6 +284,27 @@ func LoadClient(path string) (*ClientConfig, error) {
 			}
 		} else if p.Upstream == "" {
 			return nil, fmt.Errorf("publish[%d] (%s): upstream is required", i, p.URL)
+		}
+	}
+	if c.Tun.Enable {
+		if c.Tun.TAP == nil && c.Tun.UDP == nil {
+			return nil, fmt.Errorf("tun: enable requires at least one of tap or udp")
+		}
+		if c.Tun.MTU == 0 {
+			c.Tun.MTU = 1448
+		}
+		if c.Tun.TAP != nil {
+			if c.Tun.TAP.Name == "" {
+				c.Tun.TAP.Name = "tbox0"
+			}
+			if c.Tun.TAP.IPv4CIDR != "" {
+				if _, _, err := net.ParseCIDR(c.Tun.TAP.IPv4CIDR); err != nil {
+					return nil, fmt.Errorf("tun.tap.ipv4_cidr %q: %w", c.Tun.TAP.IPv4CIDR, err)
+				}
+			}
+		}
+		if c.Tun.UDP != nil && c.Tun.UDP.Listen == "" {
+			return nil, fmt.Errorf("tun.udp.listen is required when udp is set")
 		}
 	}
 	return &c, nil

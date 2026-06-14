@@ -70,7 +70,7 @@ func RunClient(cfg *config.ClientConfig) error {
 		return err
 	}
 
-	cc := control.NewClient(tok.UUID, certs, services, dial, logger)
+	cc := control.NewClient(tok.UUID, certs, services, buildTunParams(cfg.Tun), dial, logger)
 
 	if cfg.AdminListen != "" {
 		adminLn, err := net.Listen("tcp", cfg.AdminListen)
@@ -132,6 +132,28 @@ func buildServices(pubs []config.Publish) ([]control.ServiceReg, error) {
 		out = append(out, svc)
 	}
 	return out, nil
+}
+
+// buildTunParams translates client tun config into control-plane params, or
+// returns nil when the L2 tunnel is disabled.
+func buildTunParams(t config.ClientTun) *control.ClientTunParams {
+	if !t.Enable {
+		return nil
+	}
+	p := &control.ClientTunParams{
+		AcceptDefaultRoute: t.AcceptDefaultRoute,
+		MTU:                t.MTU,
+	}
+	if t.TAP != nil {
+		p.TAPEnable = true
+		p.TAPName = t.TAP.Name
+		p.TAPv4 = t.TAP.IPv4CIDR
+		p.TAPv6 = t.TAP.IPv6
+	}
+	if t.UDP != nil {
+		p.UDPListen = t.UDP.Listen
+	}
+	return p
 }
 
 // makeControlDialer returns a DialFunc that reaches the server's control

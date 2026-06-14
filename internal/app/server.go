@@ -13,6 +13,7 @@ import (
 
 	"github.com/juliuswwj/tbox/internal/config"
 	"github.com/juliuswwj/tbox/internal/control"
+	"github.com/juliuswwj/tbox/internal/l2"
 	"github.com/juliuswwj/tbox/internal/l4router"
 	"github.com/juliuswwj/tbox/internal/singbox"
 )
@@ -74,7 +75,13 @@ func RunServer(cfg *config.ServerConfig) error {
 	if len(cfg.Certs) > 0 {
 		logger.Printf("loaded %d server-provided certificate(s)", len(cfg.Certs))
 	}
-	csrv := control.NewServer(reg, clientMap, logger)
+	hub, tunCleanup, err := setupTunHub(cfg, logger)
+	if err != nil {
+		return fmt.Errorf("tun: %w", err)
+	}
+	defer tunCleanup()
+
+	csrv := control.NewServer(reg, clientMap, hub, logger)
 	ctrlLn, err := net.Listen("tcp", cfg.ControlAddr)
 	if err != nil {
 		return fmt.Errorf("listen control %s: %w", cfg.ControlAddr, err)
@@ -101,6 +108,83 @@ func RunServer(cfg *config.ServerConfig) error {
 	case err := <-errc:
 		return fmt.Errorf("l4 router: %w", err)
 	}
+}
+
+// setupTunHub starts the server-side L2 tunnel hub when enabled: it creates the
+// TAP device, brings it up with the gateway address, optionally enables NAT
+// egress and IPv6 passthrough, and starts the local TAP read loop. It returns
+// the hub (nil when disabled) and a cleanup to run at shutdown.
+func setupTunHub(cfg *config.ServerConfig, logger *log.Logger) (*control.TunHub, func(), error) {
+	noop := func() {}
+	if !cfg.Tun.Enable {
+		return nil, noop, nil
+	}
+
+	_, poolNet, err := net.ParseCIDR(cfg.Tun.PoolV4)
+	if err != nil {
+		return nil, noop, fmt.Errorf("pool_v4: %w", err)
+	}
+
+	dev, err := l2.Open(cfg.Tun.TapName)
+	if err != nil {
+		return nil, noop, fmt.Errorf("open tap: %w", err)
+	}
+	name := dev.Name()
+	if err := l2.SetUp(name, cfg.Tun.MTU); err != nil {
+		_ = dev.Close()
+		return nil, noop, err
+	}
+	ones, _ := poolNet.Mask.Size()
+	if err := l2.AddAddr(name, fmt.Sprintf("%s/%d", cfg.Tun.Gateway, ones)); err != nil {
+		_ = dev.Close()
+		return nil, noop, fmt.Errorf("gateway addr: %w", err)
+	}
+	if cfg.Tun.Bridge != "" {
+		if err := l2.AddToBridge(name, cfg.Tun.Bridge); err != nil {
+			_ = dev.Close()
+			return nil, noop, fmt.Errorf("bridge: %w", err)
+		}
+	}
+
+	var onIPv6 func(net.IP)
+	if cfg.Tun.EnablePassthrough {
+		onIPv6 = l2.NewPassthrough(name, logger).OnIPv6
+	}
+	sw := l2.New(onIPv6, logger)
+	tapPort := sw.AddPort(func(f []byte) error { _, e := dev.Write(f); return e }, l2.PortConfig{Name: "tap:" + name})
+	go func() {
+		buf := make([]byte, l2.MaxEtherFrame)
+		for {
+			n, err := dev.Read(buf)
+			if err != nil {
+				return
+			}
+			sw.Inject(tapPort, buf[:n])
+		}
+	}()
+
+	natCleanup := noop
+	if cfg.Tun.EnableNAT {
+		if err := l2.EnableIPForward(); err != nil {
+			logger.Printf("tun: enable forwarding: %v", err)
+		}
+		cleanup, err := l2.EnsureMasquerade(cfg.Tun.PoolV4, cfg.Tun.WANInterface)
+		if err != nil {
+			_ = dev.Close()
+			return nil, noop, fmt.Errorf("nat: %w", err)
+		}
+		natCleanup = func() { _ = cleanup() }
+	}
+
+	hub := control.NewTunHub(sw, cfg.Tun.Gateway, poolNet, cfg.Tun.MTU, cfg.Tun.EnableNAT, cfg.ServerAddr, logger)
+	logger.Printf("tun hub: TAP %s, gateway %s, pool %s (nat=%v, passthrough=%v)",
+		name, cfg.Tun.Gateway, cfg.Tun.PoolV4, cfg.Tun.EnableNAT, cfg.Tun.EnablePassthrough)
+
+	cleanup := func() {
+		natCleanup()
+		_ = dev.Close()
+	}
+	return hub, cleanup, nil
 }
 
 func splitHostPort(addr string) (string, uint16, error) {

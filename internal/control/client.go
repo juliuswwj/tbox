@@ -13,9 +13,22 @@ import (
 	"github.com/hashicorp/yamux"
 
 	"github.com/juliuswwj/tbox/internal/destallow"
+	"github.com/juliuswwj/tbox/internal/l2"
 	"github.com/juliuswwj/tbox/internal/socks5"
 	"github.com/juliuswwj/tbox/internal/tunnel"
 )
+
+// ClientTunParams configures the client-side L2 tunnel data plane. It is nil
+// when the tunnel is disabled.
+type ClientTunParams struct {
+	TAPEnable          bool
+	TAPName            string
+	TAPv4              string // manual CIDR override; "" uses the server assignment
+	TAPv6              string
+	UDPListen          string // "" disables the udpt UDP endpoint
+	AcceptDefaultRoute bool
+	MTU                int
+}
 
 // DialFunc opens a carrier connection to the server's control address, tunneled
 // through the VLESS-REALITY outbound (typically via the local SOCKS inbound).
@@ -29,6 +42,7 @@ type Client struct {
 	dial     DialFunc
 	certs    []CertReg
 	services []ServiceReg
+	tun      *ClientTunParams // nil = tunnel disabled
 	logger   *log.Logger
 
 	serviceByID map[string]ServiceReg
@@ -44,7 +58,7 @@ type Client struct {
 
 // NewClient builds a control client. certs are the (optional) client-provided
 // certificates; services are the published services with initial allow lists.
-func NewClient(uuid string, certs []CertReg, services []ServiceReg, dial DialFunc, logger *log.Logger) *Client {
+func NewClient(uuid string, certs []CertReg, services []ServiceReg, tun *ClientTunParams, dial DialFunc, logger *log.Logger) *Client {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -69,6 +83,7 @@ func NewClient(uuid string, certs []CertReg, services []ServiceReg, dial DialFun
 		dial:        dial,
 		certs:       certs,
 		services:    services,
+		tun:         tun,
 		logger:      logger,
 		serviceByID: byID,
 		destSets:    destSets,
@@ -133,12 +148,22 @@ func (c *Client) session(ctx context.Context) error {
 	if err := c.request(Message{Type: TypeAuth, UUID: c.uuid}); err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
-	if err := c.request(Message{Type: TypeRegister, Certs: c.certs, Services: c.currentServices()}); err != nil {
+	resp, err := c.requestResp(Message{Type: TypeRegister, Certs: c.certs, Services: c.currentServices()})
+	if err != nil {
 		return fmt.Errorf("register: %w", err)
 	}
 	c.logger.Printf("control: connected, registered %d cert(s), %d service(s)", len(c.certs), len(c.services))
 
 	go c.acceptLoop(sess)
+
+	if c.tun != nil {
+		node, err := c.startTun(sess, resp.Tun)
+		if err != nil {
+			c.logger.Printf("control: tun setup failed: %v", err)
+		} else {
+			defer node.Close()
+		}
+	}
 
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
@@ -245,25 +270,81 @@ func (c *Client) currentServices() []ServiceReg {
 	return out
 }
 
-// request sends a message and waits for the server's ack.
+// request sends a message and waits for the server's ack, discarding the body.
 func (c *Client) request(m Message) error {
+	_, err := c.requestResp(m)
+	return err
+}
+
+// requestResp sends a message and returns the server's ack (so callers can read
+// fields such as the tun assignment).
+func (c *Client) requestResp(m Message) (Message, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	c.mu.Lock()
 	enc, dec := c.enc, c.dec
 	c.mu.Unlock()
 	if enc == nil || dec == nil {
-		return errors.New("not connected")
+		return Message{}, errors.New("not connected")
 	}
 	if err := enc.Encode(m); err != nil {
-		return err
+		return Message{}, err
 	}
 	var resp Message
 	if err := dec.Decode(&resp); err != nil {
-		return err
+		return Message{}, err
 	}
 	if resp.Type != TypeAck || !resp.OK {
-		return fmt.Errorf("server rejected %s: %s", m.Type, resp.Error)
+		return resp, fmt.Errorf("server rejected %s: %s", m.Type, resp.Error)
 	}
-	return nil
+	return resp, nil
+}
+
+// startTun opens the L2 data stream, applies the server assignment, and starts
+// the client-side node (uplink + optional native TAP + optional UDP endpoint).
+func (c *Client) startTun(sess *yamux.Session, asg *TunAssignment) (*l2.ClientNode, error) {
+	stream, err := sess.OpenStream()
+	if err != nil {
+		return nil, fmt.Errorf("open tun stream: %w", err)
+	}
+	if err := tunnel.WriteFrame(stream, tunnel.Frame{Service: TunService}); err != nil {
+		_ = stream.Close()
+		return nil, fmt.Errorf("tag tun stream: %w", err)
+	}
+
+	opts := l2.ClientOptions{MTU: c.tun.MTU, UDPListen: c.tun.UDPListen}
+	if c.tun.TAPEnable {
+		tap := &l2.ClientTAP{Name: c.tun.TAPName, IPv6: c.tun.TAPv6}
+		switch {
+		case c.tun.TAPv4 != "":
+			tap.IPv4CIDR = c.tun.TAPv4
+		case asg != nil:
+			tap.IPv4CIDR = asg.IPv4CIDR
+		}
+		if asg != nil {
+			tap.Gateway = asg.Gateway
+			tap.SubnetRoute = asg.SubnetRoute
+			tap.ServerRealIP = asg.ServerRealIP
+			tap.DefaultRoute = c.tun.AcceptDefaultRoute && asg.DefaultRoute
+			if opts.MTU == 0 {
+				opts.MTU = asg.MTU
+			}
+		}
+		if tap.IPv4CIDR == "" {
+			c.logger.Printf("control: tun TAP enabled but no IPv4 (no manual addr, no server assignment); skipping native TAP")
+		} else {
+			opts.TAP = tap
+		}
+	}
+	if opts.TAP == nil && opts.UDPListen == "" {
+		_ = stream.Close()
+		return nil, errors.New("tun enabled but neither TAP nor UDP is usable")
+	}
+
+	node, err := l2.StartClient(stream, opts, c.logger)
+	if err != nil {
+		_ = stream.Close()
+		return nil, err
+	}
+	return node, nil
 }

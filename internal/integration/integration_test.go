@@ -80,7 +80,7 @@ func TestEndToEnd(t *testing.T) {
 	cert, key := genCert(t, "dc.example.com", "*.dc.example.com")
 	must(t, reg.AddServerCert(cert, key))
 
-	csrv := control.NewServer(reg, map[string]string{uuidA: "a", uuidB: "b"}, logger)
+	csrv := control.NewServer(reg, map[string]string{uuidA: "a", uuidB: "b"}, nil, logger)
 	ctrlLn, err := net.Listen("tcp", ctrlAddr)
 	must(t, err)
 	defer ctrlLn.Close()
@@ -220,7 +220,7 @@ func startClient(t *testing.T, socksAddr, publicAddr, uuid, pubKey, shortID, ctr
 	dial := func(ctx context.Context) (net.Conn, error) {
 		return ctxDialer.DialContext(ctx, "tcp", ctrlAddr)
 	}
-	cc := control.NewClient(uuid, certs, services, dial, logger)
+	cc := control.NewClient(uuid, certs, services, nil, dial, logger)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go cc.Run(ctx)

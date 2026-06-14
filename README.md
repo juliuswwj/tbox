@@ -3,8 +3,8 @@
 [![test](https://github.com/juliuswwj/tbox/actions/workflows/test.yml/badge.svg)](https://github.com/juliuswwj/tbox/actions/workflows/test.yml)
 
 A VLESS-REALITY tunnel built on [sing-box](https://sing-box.sagernet.org/),
-serving two purposes over one censorship-resistant link that looks like ordinary
-HTTPS traffic to a real site (e.g. `www.microsoft.com`):
+serving three purposes over one censorship-resistant link that looks like
+ordinary HTTPS traffic to a real site (e.g. `www.microsoft.com`):
 
 1. **Service publishing** — expose local services through the VPS, identified by
    a URL whose scheme picks the mode:
@@ -23,6 +23,12 @@ HTTPS traffic to a real site (e.g. `www.microsoft.com`):
    *.dc.example.com]`.
 2. **SOCKS5H proxy** — a local SOCKS5H port whose traffic egresses from the VPS,
    to get through a monitored gateway.
+3. **L2 tunnel (TAP)** — an Ethernet-level virtual network over the same
+   carrier. The server is a learning bridge (a native Go re-implementation of
+   the `udpt.py` UDP bridge); clients join as nodes either through their own TAP
+   device or by letting **unmodified `udpt.py` clients** connect to a local UDP
+   socket. Supports a virtual subnet, global egress (v4 NAT), and IPv6
+   transparent passthrough (`ndppd`). See [L2 tunnel](#l2-tunnel-tap).
 
 ```
  local apps ──socks5h──▶ tbox client ══VLESS-REALITY══▶ tbox server (VPS) ──▶ internet
@@ -62,6 +68,12 @@ HTTPS traffic to a real site (e.g. `www.microsoft.com`):
 - **Dynamic source-IP whitelist**: each service has an atomically swappable CIDR
   allow list, enforced at L4 and again at the HTTP layer, and changeable at
   runtime via `tbox whitelist` (keyed by service URL).
+- **L2 tunnel** (when enabled): a dedicated yamux stream per client carries
+  length-prefixed Ethernet frames. The server runs a userspace learning switch
+  whose ports are the local TAP plus each client's stream; clients run the same
+  switch with the carrier stream as the uplink and local TAP and/or a UDP
+  endpoint as ports. Forwarding is by MAC, so two local `udpt.py` clients on one
+  tbox client are switched on that host and never traverse the carrier.
 
 ## Build
 
@@ -117,6 +129,59 @@ tbox whitelist -c client.yaml add    tcp://ssh.dc.example.com 198.51.100.7/32
 tbox whitelist -c client.yaml remove tcp://ssh.dc.example.com 203.0.113.0/24
 ```
 
+## L2 tunnel (TAP)
+
+The L2 tunnel turns the carrier into an Ethernet segment shared by the server
+and all clients. It absorbs the model of the reference `udpt.py` bridge but runs
+the switching natively in Go and rides the existing encrypted carrier (no extra
+UDP port is exposed to the internet, so the "looks like HTTPS" property holds).
+
+```
+ udpt.py ─udp─▶┐                                            ┌── server TAP (tbox0, gateway)
+ udpt.py ─udp─▶┤ tbox client (switch) ══tun stream══▶ tbox server (switch hub) ─┼── NAT egress (eth0)
+ native TAP ───┘    (uplink + UDP + TAP ports)              :443                └── IPv6 passthrough (ndppd)
+```
+
+- **Server** (the hub) creates a TAP device and switches between the local TAP
+  and each client's carrier stream by MAC. Enable it in `server.yaml`:
+
+  ```yaml
+  tun:
+    enable: true
+    pool_v4: "10.42.0.0/24"   # gateway defaults to 10.42.0.1
+    enable_nat: true          # MASQUERADE the pool out wan_interface for global egress
+    wan_interface: "eth0"
+    enable_passthrough: true  # add /80 routes + restart ndppd for global IPv6
+  ```
+
+- **Client** (a leaf) enables at least one local endpoint in `client.yaml`:
+
+  ```yaml
+  tun:
+    enable: true
+    accept_default_route: false   # set true (with tap) to route everything via the tunnel
+    tap:                          # make this host a node (IPv4 auto-assigned if omitted)
+      name: "tbox0"
+    udp:                          # let unmodified udpt.py clients join over UDP
+      listen: "127.0.0.1:3390"
+  ```
+
+- **Connecting `udpt.py`** (unchanged) to a client's UDP endpoint:
+
+  ```sh
+  python3 udpt.py --target 127.0.0.1:3390 --tap tap0 --ip 10.42.0.20/24
+  ```
+
+  Each udpt peer is a distinct switch port, so multiple udpt clients on one tbox
+  client reach each other locally and reach the server-side segment over the
+  tunnel. Virtual IPs are either server-assigned (native TAP) or self-configured
+  (`udpt.py --ip`).
+
+The server, and any client using a native TAP or `accept_default_route`, needs
+`CAP_NET_ADMIN`. IPv6 passthrough additionally requires `ndppd` installed and
+configured by the operator for the pool prefix; tbox adds the per-host `/80`
+routes and restarts it.
+
 ## Running as a service
 
 Hardened systemd units (run as an unprivileged `tbox` user; server binds `:443`
@@ -133,6 +198,11 @@ via `CAP_NET_BIND_SERVICE`) are in [`deploy/systemd/`](deploy/systemd/); see
 - All publish traffic for a client rides one yamux session (head-of-line
   blocking is possible under heavy concurrency); multiple carrier connections
   are a future optimization.
+- The L2 tunnel carries Ethernet frames over the TCP-based carrier, so tunneled
+  TCP is subject to TCP-over-TCP degradation under loss; it suits LAN-style
+  interconnect and moderate throughput. MTU defaults to 1448. Global-egress
+  default-route uses `server_addr` for the carrier host-route exception, which
+  applies when `server_addr` is an IP (best-effort, logged, for a hostname).
 - sing-box's Go API changes across releases; the dependency is pinned (see
   `go.mod`). Configs are built as JSON and loaded through sing-box's documented
   schema for stability.
