@@ -60,11 +60,13 @@ sudo journalctl -u tbox-client -f
 - The units pin config to `/etc/tbox/{server,client}.yaml`. To use another path,
   override with a drop-in: `sudo systemctl edit tbox-server` and set a new
   `ExecStart=`.
-- `ReadOnlyPaths=/etc/tbox` and `ProtectSystem=strict` mean the process cannot
-  write anywhere except `/tmp` (private). tbox writes no state files.
-- If you run the client's published cert/keys outside `/etc/tbox`, add that path
-  to the unit (e.g. a `ReadOnlyPaths=` drop-in) since `ProtectSystem=strict`
-  hides most of the filesystem.
+- `ProtectSystem=strict` makes the whole filesystem read-only **but still
+  readable** — it doesn't hide anything. tbox only reads its config/certs and
+  writes no state, so no `ReadWritePaths=` is needed (the `ReadOnlyPaths=/etc/tbox`
+  in the unit is just documentation; under `ProtectSystem=strict` it is already
+  read-only). Reading certs from any path (e.g. `/etc/letsencrypt`) works without
+  a `ReadOnlyPaths=` drop-in; the only thing that can block it is the files' own
+  permissions (DAC), not the sandbox.
 - `tbox whitelist -c /etc/tbox/client.yaml ...` talks to the client's local
   admin port and can be run by hand while the service is active.
 
@@ -107,12 +109,18 @@ It writes `/etc/tbox/<domain>.crt` (fullchain) and `/etc/tbox/<domain>.key`
 (privkey) — set the `certs:` entry in `client.yaml` to match. Renewals then
 refresh those files and restart `tbox-client` automatically.
 
-> Alternatives: run `tbox-client` as root (drop `User=tbox` and add a
-> `ReadWritePaths=`/`ReadOnlyPaths=/etc/letsencrypt` drop-in), or grant the
-> `tbox` user an ACL on the LE dirs (`setfacl -Rm u:tbox:rX /etc/letsencrypt/{live,archive}`)
-> — but certbot can reset those perms on renewal, so the copy hook is the
-> sturdiest. Either way, if your certs stay outside `/etc/tbox`, add a
-> `ReadOnlyPaths=` drop-in for that path because `ProtectSystem=strict` is set.
+> Reading directly from `/etc/letsencrypt` instead of copying: the only barrier
+> is the DAC perms (`/etc/letsencrypt/{live,archive}` are `0700 root`), **not**
+> the systemd sandbox — `ProtectSystem=strict` keeps those paths readable, so no
+> `ReadOnlyPaths=` drop-in is required. Fix the perms by either:
+>
+> - running `tbox-client` as root (drop `User=tbox`); or
+> - granting the `tbox` user an ACL on **both** LE dirs — `live/` holds symlinks
+>   into `archive/`, so both need `r-x`:
+>   `sudo setfacl -Rm u:tbox:rX /etc/letsencrypt/live /etc/letsencrypt/archive`
+>
+> certbot can reset those perms on renewal, so the copy hook above is the
+> sturdiest option.
 
 ## Troubleshooting
 
