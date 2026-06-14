@@ -2,14 +2,15 @@ name: test
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
 
 permissions:
   contents: read
 
 jobs:
-  test:
+  # Deterministic gate: lint, vet, build, and the unit tests (no network).
+  unit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,8 +34,33 @@ jobs:
       - name: build
         run: go build -tags with_utls ./...
 
-      - name: test
-        # sing-box REALITY needs the with_utls tag. The integration test makes a
-        # real TLS handshake to the mimic host (needs outbound internet on the
-        # runner), which is available on GitHub-hosted runners.
-        run: go test -tags with_utls -race -count=1 ./...
+      - name: unit tests
+        # -short skips the end-to-end test (which needs a live REALITY handshake
+        # to the mimic host); these are deterministic and must always pass.
+        run: go test -tags with_utls -short -race -count=1 ./...
+
+  # Best-effort end-to-end test: a real VLESS-REALITY handshake to the mimic
+  # host (www.microsoft.com). Network-dependent, so retried a few times to
+  # absorb transient flakes on shared runners.
+  e2e:
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: end-to-end (retried)
+        run: |
+          for i in 1 2 3; do
+            if go test -tags with_utls -race -count=1 -run TestEndToEnd ./internal/integration/; then
+              exit 0
+            fi
+            echo "::warning::e2e attempt $i failed (likely transient network); retrying in 10s"
+            sleep 10
+          done
+          echo "::error::e2e failed after 3 attempts"
+          exit 1
