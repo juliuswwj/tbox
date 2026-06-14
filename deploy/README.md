@@ -67,3 +67,17 @@ sudo journalctl -u tbox-client -f
   hides most of the filesystem.
 - `tbox whitelist -c /etc/tbox/client.yaml ...` talks to the client's local
   admin port and can be run by hand while the service is active.
+
+## Troubleshooting
+
+- **`start sing-box: address family not supported by protocol`** — the unit's
+  `RestrictAddressFamilies` is missing `AF_NETLINK`, which sing-box needs for its
+  network/interface monitor. The shipped units include it; if you have an older
+  copy, add `AF_NETLINK` (e.g. `sudo systemctl edit tbox-server`):
+
+  ```ini
+  [Service]
+  RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+  ```
+
+  then `sudo systemctl daemon-reload && sudo systemctl restart tbox-server`.

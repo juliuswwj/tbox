@@ -35,7 +35,9 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK is required: sing-box opens a netlink socket at startup for its
+# network/interface monitor (omitting it fails with EAFNOSUPPORT).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
 # Config lives under /etc/tbox; nothing needs to be written at runtime.
