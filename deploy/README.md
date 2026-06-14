@@ -70,57 +70,87 @@ sudo journalctl -u tbox-client -f
 - `tbox whitelist -c /etc/tbox/client.yaml ...` talks to the client's local
   admin port and can be run by hand while the service is active.
 
-## Let's Encrypt certificates (client)
+## Let's Encrypt certificates
 
-Certs can be provided by the **server** (`server.yaml` `certs:`) — simplest, no
-client-side cert plumbing — or by the **client**, which uploads them over the
-tunnel. To use Let's Encrypt on the client, list the cert under `certs:` (names
-are read from the SAN, so one cert covers all its `publish:` hosts):
+The cert's domain names are read from its SAN, so one cert (incl. a wildcard)
+covers all of its `publish:` hosts; you never repeat the domain. Pick ONE of the
+three setups below. Two facts to keep in mind for the client-side options:
+
+- **Permissions** — `/etc/letsencrypt/{live,archive}` are `0700 root`, so the
+  unprivileged `tbox` user can't read `privkey.pem` without help.
+- **Renewal** — tbox reads certs at startup, so a renewed cert is picked up only
+  after `tbox-client` restarts.
+
+### Option A — server provides the cert (simplest)
+
+certbot runs on the VPS; nothing cert-related on the client. The `tbox-server`
+process runs as root or via the deploy hook below; point `server.yaml` at it:
 
 ```yaml
+# /etc/tbox/server.yaml
 certs:
-  - cert_path: "/etc/tbox/app.example.com.crt"   # fullchain
-    key_path:  "/etc/tbox/app.example.com.key"   # privkey
+  - cert_path: "/etc/tbox/dc.example.com.crt"
+    key_path:  "/etc/tbox/dc.example.com.key"
+```
+
+```yaml
+# /etc/tbox/client.yaml — no certs: section at all
+publish:
+  - url: "https://app.dc.example.com/"
+    upstream: "127.0.0.1:8080"
+```
+
+### Option B — client cert via the copy hook (recommended for client-held certs)
+
+The shipped hook copies each renewed cert/key into `/etc/tbox` as `root:tbox
+0640` and restarts the client (solves both perms and renewal):
+
+```sh
+sudo install -m 0755 deploy/letsencrypt-deploy-hook.sh \
+     /etc/letsencrypt/renewal-hooks/deploy/tbox.sh
+sudo certbot certonly --standalone -d app.example.com \
+     --deploy-hook /etc/letsencrypt/renewal-hooks/deploy/tbox.sh
+```
+
+```yaml
+# /etc/tbox/client.yaml — hook writes /etc/tbox/<domain>.{crt,key}
+certs:
+  - cert_path: "/etc/tbox/app.example.com.crt"
+    key_path:  "/etc/tbox/app.example.com.key"
 publish:
   - url: "https://app.example.com/"
     upstream: "127.0.0.1:8080"
 ```
 
-Two wrinkles with certbot's output:
+### Option C — client reads /etc/letsencrypt directly (no copy)
 
-1. **Permissions** — `/etc/letsencrypt/{live,archive}` are `0700 root`, so the
-   unprivileged `tbox` user can't read `privkey.pem`.
-2. **Renewal** — tbox reads the cert once at startup (and re-sends the same PEM
-   on reconnect), so a renewed cert is only picked up after a restart.
-
-The shipped deploy hook solves both: it copies each renewed cert/key into
-`/etc/tbox` as `root:tbox 0640` and restarts the client.
+Point `client.yaml` straight at certbot's files. Grant the `tbox` user an ACL on
+**both** LE dirs (`live/` symlinks into `archive/`, so both need `r-x`), and add
+a restart hook (the systemd sandbox does NOT block this — `ProtectSystem=strict`
+keeps the paths readable; the only barrier is the `0700` perms, which the ACL
+fixes — no `ReadOnlyPaths=` drop-in is needed):
 
 ```sh
-sudo install -m 0755 deploy/letsencrypt-deploy-hook.sh \
-     /etc/letsencrypt/renewal-hooks/deploy/tbox.sh
+sudo setfacl -Rm u:tbox:rX /etc/letsencrypt/live /etc/letsencrypt/archive
 
-# initial issuance (also runs the hook so /etc/tbox/<domain>.{crt,key} appear):
-sudo certbot certonly --standalone -d app.example.com \
-     --deploy-hook /etc/letsencrypt/renewal-hooks/deploy/tbox.sh
+printf '#!/bin/sh\nsystemctl restart tbox-client\n' \
+  | sudo tee /etc/letsencrypt/renewal-hooks/deploy/tbox-restart.sh
+sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/tbox-restart.sh
 ```
 
-It writes `/etc/tbox/<domain>.crt` (fullchain) and `/etc/tbox/<domain>.key`
-(privkey) — set the `certs:` entry in `client.yaml` to match. Renewals then
-refresh those files and restart `tbox-client` automatically.
+```yaml
+# /etc/tbox/client.yaml — read certbot's files in place
+certs:
+  - cert_path: "/etc/letsencrypt/live/app.example.com/fullchain.pem"
+    key_path:  "/etc/letsencrypt/live/app.example.com/privkey.pem"
+publish:
+  - url: "https://app.example.com/"
+    upstream: "127.0.0.1:8080"
+```
 
-> Reading directly from `/etc/letsencrypt` instead of copying: the only barrier
-> is the DAC perms (`/etc/letsencrypt/{live,archive}` are `0700 root`), **not**
-> the systemd sandbox — `ProtectSystem=strict` keeps those paths readable, so no
-> `ReadOnlyPaths=` drop-in is required. Fix the perms by either:
->
-> - running `tbox-client` as root (drop `User=tbox`); or
-> - granting the `tbox` user an ACL on **both** LE dirs — `live/` holds symlinks
->   into `archive/`, so both need `r-x`:
->   `sudo setfacl -Rm u:tbox:rX /etc/letsencrypt/live /etc/letsencrypt/archive`
->
-> certbot can reset those perms on renewal, so the copy hook above is the
-> sturdiest option.
+> certbot can reset perms on renewal (re-running the ACL), so Option B is a bit
+> sturdier than C. Running `tbox-client` as root (drop `User=tbox` from the unit)
+> also works and needs no ACL.
 
 ## Troubleshooting
 
