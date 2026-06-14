@@ -122,47 +122,42 @@ publish:
     upstream: "127.0.0.1:8080"
 ```
 
-### Option C — client reads /etc/letsencrypt directly (no copy)
+### Option C — cert is copied in from elsewhere (no local certbot)
 
-Point `client.yaml` straight at certbot's files. The `tbox` user needs an ACL on
-**both** LE dirs (`live/` symlinks into `archive/`, so both need `r-x`). The
-catch: on renewal certbot writes **new** files into `archive/`, which do *not*
-inherit the ACL — so the ACL must be re-applied (and the client restarted) on
-every renewal. Use the shipped deploy hook for that; it runs as root exactly
-when the cert changes:
+Use this when certbot runs somewhere else (e.g. the VPS or a cert manager) and
+something `scp`/`rsync`s the renewed cert+key onto the client. There is no local
+certbot, so no `renewal-hooks/` to fire — instead a **root cron** job watches the
+files and, when they change, re-applies the `tbox` read ACL and restarts the
+client. (No `ReadOnlyPaths=` drop-in is needed: `ProtectSystem=strict` keeps the
+files readable; only the file perms matter, which the ACL fixes.)
 
 ```sh
-sudo install -m 0755 deploy/letsencrypt-acl-hook.sh \
-     /etc/letsencrypt/renewal-hooks/deploy/tbox-acl.sh
+# the watcher: setfacl + restart tbox-client whenever a watched file changes
+sudo install -m 0755 deploy/cert-watch.sh /usr/local/sbin/tbox-cert-watch.sh
 
-# apply now for the already-issued cert (sets the ACL + restarts the client):
-sudo /etc/letsencrypt/renewal-hooks/deploy/tbox-acl.sh
+# run it every minute as root, listing your copied-in cert + key:
+printf '* * * * * root /usr/local/sbin/tbox-cert-watch.sh %s %s\n' \
+  /etc/tbox/app.example.com.crt /etc/tbox/app.example.com.key \
+  | sudo tee /etc/cron.d/tbox-cert-watch
 ```
 
 ```yaml
-# /etc/tbox/client.yaml — read certbot's files in place
+# /etc/tbox/client.yaml — point at wherever the cert is copied to
 certs:
-  - cert_path: "/etc/letsencrypt/live/app.example.com/fullchain.pem"
-    key_path:  "/etc/letsencrypt/live/app.example.com/privkey.pem"
+  - cert_path: "/etc/tbox/app.example.com.crt"
+    key_path:  "/etc/tbox/app.example.com.key"
 publish:
   - url: "https://app.example.com/"
     upstream: "127.0.0.1:8080"
 ```
 
-The hook (`deploy/letsencrypt-acl-hook.sh`) just runs, as root on each renewal:
+The watcher uses an ACL (`setfacl -m u:tbox:r`), so the copied files can stay
+`root:root 0600` — re-copying doesn't lock tbox out, and the restart picks up the
+new cert. (Prefer an event-driven trigger? A systemd `.path` unit watching the
+files can call the same script instead of cron.)
 
-```sh
-setfacl -Rm u:tbox:rX /etc/letsencrypt/live /etc/letsencrypt/archive
-systemctl try-restart tbox-client
-```
-
-(The systemd sandbox does NOT block reads here — `ProtectSystem=strict` keeps the
-paths readable; the only barrier is the `0700` perms, which the ACL fixes, so no
-`ReadOnlyPaths=` drop-in is needed.)
-
-> Running `tbox-client` as root (drop `User=tbox` from the unit) also works and
-> needs no ACL — but the deploy hook's `systemctl restart` is still required so a
-> renewed cert is actually re-read.
+> Running `tbox-client` as root (drop `User=tbox` from the unit) avoids the ACL
+> entirely; you still need the cron restart so the renewed cert is loaded.
 
 ## Troubleshooting
 
