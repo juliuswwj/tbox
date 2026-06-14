@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"gopkg.in/yaml.v3"
@@ -182,6 +183,24 @@ func (c *ServerConfig) PublicPort() uint16 {
 		return 443
 	}
 	return uint16(p)
+}
+
+// SaveServer writes a server config to disk (0640, creating parent dirs). It
+// rewrites the file from the struct, so hand-added comments are not preserved.
+func SaveServer(path string, c *ServerConfig) error {
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("marshal server config: %w", err)
+	}
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return err
+		}
+	}
+	if err := os.WriteFile(path, data, 0o640); err != nil {
+		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	return nil
 }
 
 func loadYAML(path string, dst any) error {

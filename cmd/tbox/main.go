@@ -26,6 +26,10 @@ func main() {
 		err = cmdServer(os.Args[2:])
 	case "client":
 		err = cmdClient(os.Args[2:])
+	case "init-server":
+		err = cmdInitServer(os.Args[2:])
+	case "add-client":
+		err = cmdAddClient(os.Args[2:])
 	case "gen-keypair":
 		err = cmdGenKeypair()
 	case "gen-token":
@@ -52,15 +56,22 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `tbox — VLESS-REALITY service publishing + SOCKS5H proxy
 
+Quick start (server):
+  tbox init-server -c server.yaml --addr <vps-host>   # writes config + keys, prints first token
+  tbox add-client  -c server.yaml <name>              # adds a client, prints its token
+  tbox server      -c server.yaml
+
 Usage:
-  tbox server   -c server.yaml
-  tbox client   -c client.yaml
-  tbox gen-keypair
-  tbox gen-token -c server.yaml --client <name>
-  tbox whitelist -c client.yaml show
-  tbox whitelist -c client.yaml set    <domain> <cidr>...
-  tbox whitelist -c client.yaml add    <domain> <cidr>...
-  tbox whitelist -c client.yaml remove <domain> <cidr>...
+  tbox init-server -c server.yaml --addr <host> [--mimic www.microsoft.com:443] [--listen :443] [--client <name>] [--force]
+  tbox add-client  -c server.yaml <name>
+  tbox server      -c server.yaml
+  tbox client      -c client.yaml
+  tbox gen-token   -c server.yaml [--client <name>]   # re-print token(s) for existing client(s)
+  tbox gen-keypair                                    # low-level: just print keys
+  tbox whitelist   -c client.yaml show
+  tbox whitelist   -c client.yaml set    <domain> <cidr>...
+  tbox whitelist   -c client.yaml add    <domain> <cidr>...
+  tbox whitelist   -c client.yaml remove <domain> <cidr>...
   tbox version
 `)
 }
@@ -111,22 +122,77 @@ func cmdGenKeypair() error {
 	return nil
 }
 
+func cmdInitServer(args []string) error {
+	var cfgPath, addr string
+	mimic := "www.microsoft.com:443"
+	listen := ":443"
+	client := "default"
+	force := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-c", "--config":
+			cfgPath, i = nextArg(args, i)
+		case "--addr":
+			addr, i = nextArg(args, i)
+		case "--mimic":
+			mimic, i = nextArg(args, i)
+		case "--listen":
+			listen, i = nextArg(args, i)
+		case "--client":
+			client, i = nextArg(args, i)
+		case "--force":
+			force = true
+		default:
+			return fmt.Errorf("unexpected argument %q", args[i])
+		}
+	}
+	if cfgPath == "" || addr == "" {
+		return fmt.Errorf("usage: tbox init-server -c server.yaml --addr <vps-host> [--mimic ...] [--listen ...] [--client <name>] [--force]")
+	}
+	tok, err := app.InitServer(cfgPath, addr, mimic, listen, client, force)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("wrote %s (mimic %s, client %q)\n", cfgPath, mimic, client)
+	fmt.Printf("\n# token for client %q (put this in the client's client.yaml):\n%s\n", client, tok)
+	fmt.Printf("\nNext: add more clients with `tbox add-client -c %s <name>`, then run `tbox server -c %s`.\n", cfgPath, cfgPath)
+	return nil
+}
+
+func cmdAddClient(args []string) error {
+	var cfgPath string
+	var name string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-c", "--config":
+			cfgPath, i = nextArg(args, i)
+		default:
+			if name == "" {
+				name = args[i]
+			} else {
+				return fmt.Errorf("unexpected argument %q", args[i])
+			}
+		}
+	}
+	if cfgPath == "" || name == "" {
+		return fmt.Errorf("usage: tbox add-client -c server.yaml <name>")
+	}
+	tok, err := app.AddClient(cfgPath, name)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("# token for client %q (put this in the client's client.yaml):\n%s\n", name, tok)
+	return nil
+}
+
 func cmdGenToken(args []string) error {
 	var cfgPath, clientName string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-c", "--config":
-			if i+1 >= len(args) {
-				return fmt.Errorf("missing value for %s", args[i])
-			}
-			cfgPath = args[i+1]
-			i++
+			cfgPath, i = nextArg(args, i)
 		case "--client":
-			if i+1 >= len(args) {
-				return fmt.Errorf("missing value for --client")
-			}
-			clientName = args[i+1]
-			i++
+			clientName, i = nextArg(args, i)
 		}
 	}
 	if cfgPath == "" {
@@ -136,50 +202,29 @@ func cmdGenToken(args []string) error {
 	if err != nil {
 		return err
 	}
-
-	pub := cfg.RealityPublicKey
-	if pub == "" {
-		pub, err = token.PublicKeyFromPrivate(cfg.RealityPrivateKey)
-		if err != nil {
-			return fmt.Errorf("derive public key: %w", err)
-		}
-	}
-	if cfg.ServerAddr == "" {
-		return fmt.Errorf("server_addr must be set in server config to emit tokens")
-	}
-
-	emit := func(c config.ClientCred) error {
-		t := token.Token{
-			ServerAddr:  cfg.ServerAddr,
-			ServerPort:  cfg.PublicPort(),
-			UUID:        c.UUID,
-			PublicKey:   pub,
-			ShortID:     cfg.ShortID,
-			SNI:         cfg.MimicHost(),
-			ControlAddr: cfg.ControlAddr,
-		}
-		s, err := token.Encode(t)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("# token for client %q:\n%s\n", c.Name, s)
-		return nil
-	}
-
-	if clientName != "" {
+	names := []string{clientName}
+	if clientName == "" {
+		names = names[:0]
 		for _, c := range cfg.Clients {
-			if c.Name == clientName {
-				return emit(c)
-			}
+			names = append(names, c.Name)
 		}
-		return fmt.Errorf("client %q not found in config", clientName)
 	}
-	for _, c := range cfg.Clients {
-		if err := emit(c); err != nil {
+	for _, n := range names {
+		tok, err := app.TokenFor(cfg, n)
+		if err != nil {
 			return err
 		}
+		fmt.Printf("# token for client %q:\n%s\n", n, tok)
 	}
 	return nil
+}
+
+// nextArg returns the value following a flag at index i, and the advanced index.
+func nextArg(args []string, i int) (string, int) {
+	if i+1 >= len(args) {
+		return "", i
+	}
+	return args[i+1], i + 1
 }
 
 func cmdWhitelist(args []string) error {

@@ -1,8 +1,9 @@
 # tbox server (runs on the VPS).
 #
-# Generate reality_private_key / reality_public_key / short_id and a client
-# uuid with:  tbox gen-keypair
-# Then emit per-client tokens with:  tbox gen-token -c server.yaml --client <name>
+# Easiest: don't write this by hand. Generate it (keys + first client + token):
+#   tbox init-server -c server.yaml --addr <vps-host>
+#   tbox add-client  -c server.yaml <name>     # add more clients, prints tokens
+# This example is for reference / manual editing.
 
 # Public L4 SNI router address. Owns 443: SNI=mimic -> REALITY proxy;
 # SNI=a published domain -> TLS terminate + reverse proxy; else -> REALITY fallback.

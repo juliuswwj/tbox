@@ -68,14 +68,20 @@ workflow (linux/darwin/windows, amd64/arm64).
 
 ## Usage
 
-On the **server** (VPS):
+On the **server** (VPS) — no keys or UUIDs to handle by hand:
 
 ```sh
-tbox gen-keypair                       # prints reality keys, short_id, a sample uuid
-# fill server.yaml (see configs/server.example.yaml), then:
-tbox gen-token -c server.yaml --client client-1   # -> token for the client
+# 1. Generate config + REALITY keys + first client, and print its token:
+tbox init-server -c server.yaml --addr vps.example.com
+# 2. Add more clients any time (prints each one's token):
+tbox add-client  -c server.yaml laptop
+# 3. Run it:
 tbox server -c server.yaml
 ```
+
+`init-server` writes a complete `server.yaml` (REALITY keypair, short id, one
+client). `add-client` appends a client with a freshly generated UUID and prints
+its token. Re-print existing tokens with `tbox gen-token -c server.yaml`.
 
 On the **client** (local):
 
