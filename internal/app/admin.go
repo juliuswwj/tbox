@@ -9,31 +9,31 @@ import (
 	"github.com/juliuswwj/tbox/internal/control"
 )
 
-// AdminWhitelistRequest sets a domain's source-IP allow list.
+// AdminWhitelistRequest sets a service's source-IP allow list.
 type AdminWhitelistRequest struct {
-	Domain string   `json:"domain"`
-	Allow  []string `json:"allow"`
+	Service string   `json:"service"`
+	Allow   []string `json:"allow"`
 }
 
-// AdminWhitelistEntry is one domain's current allow list.
+// AdminWhitelistEntry is one service's current allow list.
 type AdminWhitelistEntry struct {
-	Domain string   `json:"domain"`
-	Allow  []string `json:"allow"`
+	Service string   `json:"service"`
+	Allow   []string `json:"allow"`
 }
 
 // serveAdmin runs the local admin HTTP API used by `tbox whitelist`.
 //
-//	GET  /whitelist            -> list all domains and allow lists
-//	POST /whitelist {domain,allow} -> replace a domain's allow list
+//	GET  /whitelist                 -> list all services and allow lists
+//	POST /whitelist {service,allow} -> replace a service's allow list
 func serveAdmin(ln net.Listener, cc *control.Client, logger *log.Logger) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/whitelist", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			var out []AdminWhitelistEntry
-			for _, d := range cc.Domains() {
-				allow, _ := cc.Whitelist(d)
-				out = append(out, AdminWhitelistEntry{Domain: d, Allow: allow})
+			for _, id := range cc.Services() {
+				allow, _ := cc.Whitelist(id)
+				out = append(out, AdminWhitelistEntry{Service: id, Allow: allow})
 			}
 			writeJSON(w, http.StatusOK, out)
 		case http.MethodPost:
@@ -42,7 +42,7 @@ func serveAdmin(ln net.Listener, cc *control.Client, logger *log.Logger) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 				return
 			}
-			if err := cc.UpdateWhitelist(req.Domain, req.Allow); err != nil {
+			if err := cc.UpdateWhitelist(req.Service, req.Allow); err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 				return
 			}

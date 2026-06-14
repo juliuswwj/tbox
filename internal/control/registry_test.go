@@ -33,15 +33,16 @@ func newSession(t *testing.T) *yamux.Session {
 	return s
 }
 
-func testCert(t *testing.T, domain string) (string, string) {
+// wildcardCert returns a cert covering both base and *.base.
+func wildcardCert(t *testing.T, base string) (string, string) {
 	t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: domain},
+		Subject:      pkix.Name{CommonName: base},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
-		DNSNames:     []string{domain},
+		DNSNames:     []string{base, "*." + base},
 	}
 	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	keyDER, _ := x509.MarshalPKCS8PrivateKey(key)
@@ -50,109 +51,115 @@ func testCert(t *testing.T, domain string) (string, string) {
 	return certPEM, keyPEM
 }
 
-func TestSharedDomainAcrossClients(t *testing.T) {
+func TestWildcardCertLookup(t *testing.T) {
 	reg := NewRegistry()
+	cert, key := wildcardCert(t, "dc.example.com")
+	if err := reg.AddServerCert(cert, key); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"dc.example.com", "app.dc.example.com", "ssh.dc.example.com"} {
+		if _, ok := reg.LookupCert(host); !ok {
+			t.Fatalf("expected cert match for %s", host)
+		}
+	}
+	for _, host := range []string{"other.com", "a.b.dc.example.com"} {
+		if _, ok := reg.LookupCert(host); ok {
+			t.Fatalf("did not expect cert match for %s", host)
+		}
+	}
+}
+
+func TestServerCertWithClientServices(t *testing.T) {
+	reg := NewRegistry()
+	cert, key := wildcardCert(t, "dc.example.com")
+	if err := reg.AddServerCert(cert, key); err != nil {
+		t.Fatal(err)
+	}
 	sA := newSession(t)
 	sB := newSession(t)
-	cert, key := testCert(t, "shared.test")
 
-	// Client A owns the domain (provides the cert) and serves "/".
-	if err := reg.Register("A", sA, ServiceReg{
-		Domain: "shared.test", Mode: "http", CertPEM: cert, KeyPEM: key,
-		Routes: []RouteReg{{Path: "/", Upstream: "127.0.0.1:1"}},
+	// A: http root on the apex + ws on a subdomain; no cert of its own.
+	if err := reg.Register("A", sA, nil, []ServiceReg{
+		{Mode: "http", Host: "dc.example.com", Path: "/", Upstream: "127.0.0.1:1"},
+		{Mode: "ws", Host: "app.dc.example.com", Path: "/tunnel/ssh", Upstream: "127.0.0.1:22"},
 	}); err != nil {
 		t.Fatalf("A register: %v", err)
 	}
-	// Client B adds a location "/b/" with no cert of its own.
-	if err := reg.Register("B", sB, ServiceReg{
-		Domain: "shared.test", Mode: "http",
-		Routes: []RouteReg{{Path: "/b/", Upstream: "127.0.0.1:2"}},
+	// B: a sub-location on the same subdomain + a tcp host. No cert.
+	if err := reg.Register("B", sB, nil, []ServiceReg{
+		{Mode: "http", Host: "app.dc.example.com", Path: "/location/", Upstream: "127.0.0.1:8080"},
+		{Mode: "tcp", Host: "ssh.dc.example.com", Upstream: "127.0.0.1:22"},
 	}); err != nil {
 		t.Fatalf("B register: %v", err)
 	}
 
-	dom, ok := reg.Lookup("shared.test")
-	if !ok {
-		t.Fatal("domain missing")
+	if !reg.HasHTTPHost("dc.example.com") {
+		t.Fatal("apex http missing")
 	}
-	if _, ok := dom.Cert(); !ok {
-		t.Fatal("domain should have a cert from A")
+	if got := len(reg.HTTPServices("app.dc.example.com")); got != 2 {
+		t.Fatalf("app.dc.example.com should have 2 http/ws services, got %d", got)
 	}
-	owner := map[string]string{}
-	for _, r := range dom.Routes() {
-		owner[r.Path] = r.ClientID
+	if _, ok := reg.TCPService("ssh.dc.example.com"); !ok {
+		t.Fatal("tcp service missing")
 	}
-	if owner["/"] != "A" || owner["/b/"] != "B" {
-		t.Fatalf("unexpected ownership: %v", owner)
-	}
-
-	// A path already owned by another client cannot be taken.
-	if err := reg.Register("B", sB, ServiceReg{
-		Domain: "shared.test", Mode: "http",
-		Routes: []RouteReg{{Path: "/", Upstream: "127.0.0.1:3"}},
-	}); err == nil {
-		t.Fatal("expected path conflict for B taking '/'")
+	// The server-provided wildcard cert serves all of them.
+	for _, h := range []string{"dc.example.com", "app.dc.example.com", "ssh.dc.example.com"} {
+		if _, ok := reg.LookupCert(h); !ok {
+			t.Fatalf("cert lookup failed for %s", h)
+		}
 	}
 }
 
-func TestPerClientWhitelistAndRemoval(t *testing.T) {
+func TestConflicts(t *testing.T) {
 	reg := NewRegistry()
 	sA := newSession(t)
 	sB := newSession(t)
-	cert, key := testCert(t, "shared.test")
+	reg.Register("A", sA, nil, []ServiceReg{{Mode: "http", Host: "app.example.com", Path: "/x/", Upstream: "127.0.0.1:1"}})
 
-	reg.Register("A", sA, ServiceReg{Domain: "shared.test", Mode: "http", CertPEM: cert, KeyPEM: key,
-		Routes: []RouteReg{{Path: "/", Upstream: "127.0.0.1:1"}}})
-	reg.Register("B", sB, ServiceReg{Domain: "shared.test", Mode: "http", Allow: []string{"10.0.0.0/8"},
-		Routes: []RouteReg{{Path: "/b/", Upstream: "127.0.0.1:2"}}})
-
-	dom, _ := reg.Lookup("shared.test")
-
-	// A allows all -> domain admits any IP at L4 (union).
-	if !dom.AllowedConn(addr("8.8.8.8")) {
-		t.Fatal("domain should admit 8.8.8.8 via A's allow-all")
+	// Same path, different client -> conflict.
+	if err := reg.Register("B", sB, nil, []ServiceReg{{Mode: "http", Host: "app.example.com", Path: "/x/", Upstream: "127.0.0.1:2"}}); err == nil {
+		t.Fatal("expected path conflict")
 	}
-	// B's location is restricted; A's is not.
-	for _, r := range dom.Routes() {
-		switch r.ClientID {
-		case "A":
-			if !r.Allow.Allowed(netip.MustParseAddr("8.8.8.8")) {
-				t.Fatal("A route should allow all")
-			}
-		case "B":
-			if r.Allow.Allowed(netip.MustParseAddr("8.8.8.8")) {
-				t.Fatal("B route should not allow 8.8.8.8")
-			}
-		}
+	// tcp on a host already used for http -> conflict.
+	if err := reg.Register("B", sB, nil, []ServiceReg{{Mode: "tcp", Host: "app.example.com", Upstream: "127.0.0.1:2"}}); err == nil {
+		t.Fatal("expected tcp/http host conflict")
 	}
-
-	// Update B's whitelist at runtime.
-	if err := reg.UpdateWhitelist("B", "shared.test", []string{"8.8.8.0/24"}); err != nil {
-		t.Fatalf("update whitelist: %v", err)
-	}
-	for _, r := range dom.Routes() {
-		if r.ClientID == "B" && !r.Allow.Allowed(netip.MustParseAddr("8.8.8.8")) {
-			t.Fatal("B route should now allow 8.8.8.8")
-		}
-	}
-
-	// Removing B's session drops only B's location; the domain survives.
-	reg.RemoveSession(sB)
-	dom, ok := reg.Lookup("shared.test")
-	if !ok {
-		t.Fatal("domain should survive after B leaves")
-	}
-	if len(dom.Routes()) != 1 || dom.Routes()[0].ClientID != "A" {
-		t.Fatalf("expected only A's route, got %+v", dom.Routes())
-	}
-
-	// Removing A (the cert owner) empties the domain.
-	reg.RemoveSession(sA)
-	if reg.Has("shared.test") {
-		t.Fatal("domain should be gone after all clients leave")
+	// Different path on same host, different client -> OK (shared host).
+	if err := reg.Register("B", sB, nil, []ServiceReg{{Mode: "http", Host: "app.example.com", Path: "/y/", Upstream: "127.0.0.1:2"}}); err != nil {
+		t.Fatalf("shared-host different path should be allowed: %v", err)
 	}
 }
 
-func addr(s string) net.Addr {
-	return &net.TCPAddr{IP: net.ParseIP(s), Port: 12345}
+func TestPerServiceWhitelistAndRemoval(t *testing.T) {
+	reg := NewRegistry()
+	sA := newSession(t)
+	reg.Register("A", sA, nil, []ServiceReg{
+		{Mode: "tcp", Host: "ssh.example.com", Upstream: "127.0.0.1:22", Allow: []string{"203.0.113.0/24"}},
+	})
+	svc, ok := reg.TCPService("ssh.example.com")
+	if !ok {
+		t.Fatal("missing tcp service")
+	}
+	id := svc.ID()
+	if id != "tcp://ssh.example.com" {
+		t.Fatalf("unexpected service id %q", id)
+	}
+	if svc.Allow.Allowed(netip.MustParseAddr("8.8.8.8")) {
+		t.Fatal("8.8.8.8 should be blocked initially")
+	}
+	if err := reg.UpdateWhitelist("A", id, []string{"8.8.8.0/24"}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !svc.Allow.Allowed(netip.MustParseAddr("8.8.8.8")) {
+		t.Fatal("8.8.8.8 should be allowed after update")
+	}
+	// Wrong owner can't update.
+	if err := reg.UpdateWhitelist("B", id, []string{"0.0.0.0/0"}); err == nil {
+		t.Fatal("expected ownership error")
+	}
+	// Session removal drops the service.
+	reg.RemoveSession(sA)
+	if _, ok := reg.TCPService("ssh.example.com"); ok {
+		t.Fatal("service should be gone after session removal")
+	}
 }

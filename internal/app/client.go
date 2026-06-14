@@ -56,6 +56,10 @@ func RunClient(cfg *config.ClientConfig) error {
 	defer inst.Close()
 	logger.Printf("SOCKS5H proxy on %s, VLESS-REALITY outbound to %s:%d", cfg.SocksListen, tok.ServerAddr, tok.ServerPort)
 
+	certs, err := buildCerts(cfg.Certs)
+	if err != nil {
+		return err
+	}
 	services, err := buildServices(cfg.Publish)
 	if err != nil {
 		return err
@@ -66,7 +70,7 @@ func RunClient(cfg *config.ClientConfig) error {
 		return err
 	}
 
-	cc := control.NewClient(tok.UUID, services, dial, logger)
+	cc := control.NewClient(tok.UUID, certs, services, dial, logger)
 
 	if cfg.AdminListen != "" {
 		adminLn, err := net.Listen("tcp", cfg.AdminListen)
@@ -85,48 +89,44 @@ func RunClient(cfg *config.ClientConfig) error {
 	return nil
 }
 
-// buildServices converts publish config into wire registrations, reading the
-// cert/key files from disk.
+// buildCerts reads the client-provided certificate files into wire form.
+func buildCerts(files []config.CertFile) ([]control.CertReg, error) {
+	out := make([]control.CertReg, 0, len(files))
+	for i, cf := range files {
+		certPEM, err := os.ReadFile(cf.CertPath)
+		if err != nil {
+			return nil, fmt.Errorf("certs[%d]: %w", i, err)
+		}
+		keyPEM, err := os.ReadFile(cf.KeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("certs[%d]: %w", i, err)
+		}
+		out = append(out, control.CertReg{CertPEM: string(certPEM), KeyPEM: string(keyPEM)})
+	}
+	return out, nil
+}
+
+// buildServices converts publish config (URL form) into wire registrations.
 func buildServices(pubs []config.Publish) ([]control.ServiceReg, error) {
 	out := make([]control.ServiceReg, 0, len(pubs))
 	for _, p := range pubs {
-		// Cert/key are optional: omit them when only adding a location to a
-		// domain whose cert another client already provides.
-		var certPEM, keyPEM string
-		if p.CertPath != "" || p.KeyPath != "" {
-			cert, err := os.ReadFile(p.CertPath)
-			if err != nil {
-				return nil, fmt.Errorf("read cert for %s: %w", p.Domain, err)
-			}
-			key, err := os.ReadFile(p.KeyPath)
-			if err != nil {
-				return nil, fmt.Errorf("read key for %s: %w", p.Domain, err)
-			}
-			certPEM, keyPEM = string(cert), string(key)
+		mode, host, path, err := p.Parse()
+		if err != nil {
+			return nil, err
 		}
 		svc := control.ServiceReg{
-			Domain:  p.Domain,
-			Mode:    p.Mode,
-			CertPEM: certPEM,
-			KeyPEM:  keyPEM,
-			Allow:   p.Allow,
+			Mode:     mode,
+			Host:     host,
+			Path:     path,
+			Upstream: p.Upstream,
+			Allow:    p.Allow,
 		}
-		switch p.Mode {
-		case "http":
-			for _, r := range p.Routes {
-				svc.Routes = append(svc.Routes, control.RouteReg{
-					Path:            r.Path,
-					Upstream:        r.Upstream,
-					StripPrefix:     r.StripPrefix,
-					AddPrefix:       r.AddPrefix,
-					SetHost:         r.SetHost,
-					RequestHeaders:  r.RequestHeaders,
-					ResponseHeaders: r.ResponseHeaders,
-				})
-			}
-		case "ws":
-			svc.WSPath = p.Path
-			svc.WSUpstream = p.Upstream
+		if mode == "http" {
+			svc.StripPrefix = p.StripPrefix
+			svc.AddPrefix = p.AddPrefix
+			svc.SetHost = p.SetHost
+			svc.RequestHeaders = p.RequestHeaders
+			svc.ResponseHeaders = p.ResponseHeaders
 		}
 		out = append(out, svc)
 	}

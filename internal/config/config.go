@@ -6,12 +6,21 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 
 	"gopkg.in/yaml.v3"
 )
+
+// CertFile points at a TLS certificate + key on disk. The covered domain names
+// are read from the certificate's SAN (so wildcards just work); they are not
+// repeated in config.
+type CertFile struct {
+	CertPath string `yaml:"cert_path"`
+	KeyPath  string `yaml:"key_path"`
+}
 
 // ServerConfig is the VPS-side configuration.
 type ServerConfig struct {
@@ -32,6 +41,9 @@ type ServerConfig struct {
 	RealityInboundAddr string       `yaml:"reality_inbound_addr"`
 	LogLevel           string       `yaml:"log_level"`
 	Clients            []ClientCred `yaml:"clients"`
+	// Certs are TLS certificates the server provides for published domains, so
+	// clients need not ship their own (avoids client-side cert dependencies).
+	Certs []CertFile `yaml:"certs"`
 }
 
 // ClientCred is a single authorized client (one VLESS user).
@@ -42,40 +54,68 @@ type ClientCred struct {
 
 // ClientConfig is the local-side configuration.
 type ClientConfig struct {
-	Token       string    `yaml:"token"`
-	SocksListen string    `yaml:"socks_listen"`
-	AdminListen string    `yaml:"admin_listen"`
-	LogLevel    string    `yaml:"log_level"`
-	Publish     []Publish `yaml:"publish"`
+	Token       string `yaml:"token"`
+	SocksListen string `yaml:"socks_listen"`
+	AdminListen string `yaml:"admin_listen"`
+	LogLevel    string `yaml:"log_level"`
+	// Certs are TLS certificates this client uploads (optional; the server may
+	// provide the cert instead).
+	Certs   []CertFile `yaml:"certs"`
+	Publish []Publish  `yaml:"publish"`
 }
 
-// Publish describes one local service exposed via the server as HTTPS.
+// Publish describes one local service exposed via the server. The service is
+// identified by a URL whose scheme selects the mode:
+//
+//	https://host/path   -> HTTP reverse proxy (with optional rewriting)
+//	wss://host/path     -> WebSocket bridged to a raw TCP upstream
+//	tcp://host          -> TLS terminated by SNI, then raw TCP to the upstream
+//
+// The host must be covered by some registered certificate (server- or
+// client-provided); the cert is matched by SNI, so wildcards work.
 type Publish struct {
-	Domain string `yaml:"domain"`
-	// CertPath/KeyPath are optional: a client that only adds locations to a
-	// domain another client already serves (with its cert) can leave them empty.
-	CertPath string   `yaml:"cert_path"`
-	KeyPath  string   `yaml:"key_path"`
-	Mode     string   `yaml:"mode"`  // "http" or "ws"
-	Allow    []string `yaml:"allow"` // initial source-IP whitelist (CIDRs); empty = allow all
+	URL      string   `yaml:"url"`
+	Upstream string   `yaml:"upstream"`
+	Allow    []string `yaml:"allow"` // source-IP whitelist (CIDRs); empty = allow all
 
-	// http mode:
-	Routes []Route `yaml:"routes,omitempty"`
-
-	// ws mode:
-	Path     string `yaml:"path,omitempty"`     // public WS path
-	Upstream string `yaml:"upstream,omitempty"` // local raw TCP target
+	// HTTP mode rewriting (ignored for ws/tcp):
+	StripPrefix     bool              `yaml:"strip_prefix"`
+	AddPrefix       string            `yaml:"add_prefix"`
+	SetHost         string            `yaml:"set_host"`
+	RequestHeaders  map[string]string `yaml:"request_headers"`
+	ResponseHeaders map[string]string `yaml:"response_headers"`
 }
 
-// Route is one HTTP reverse-proxy rule (longest path prefix wins).
-type Route struct {
-	Path            string            `yaml:"path"`             // public path prefix
-	Upstream        string            `yaml:"upstream"`         // local HTTP target host:port
-	StripPrefix     bool              `yaml:"strip_prefix"`     // strip Path before forwarding
-	AddPrefix       string            `yaml:"add_prefix"`       // prepend to upstream path
-	SetHost         string            `yaml:"set_host"`         // override Host header
-	RequestHeaders  map[string]string `yaml:"request_headers"`  // set/replace; "" value deletes
-	ResponseHeaders map[string]string `yaml:"response_headers"` // set/replace; "" value deletes
+// Parse splits the publish URL into mode (http|ws|tcp), host, and path.
+func (p Publish) Parse() (mode, host, path string, err error) {
+	u, err := url.Parse(p.URL)
+	if err != nil {
+		return "", "", "", fmt.Errorf("invalid url %q: %w", p.URL, err)
+	}
+	host = u.Hostname()
+	if host == "" {
+		return "", "", "", fmt.Errorf("url %q has no host", p.URL)
+	}
+	switch u.Scheme {
+	case "https", "http":
+		mode = "http"
+	case "wss", "ws":
+		mode = "ws"
+	case "tcp", "tls":
+		mode = "tcp"
+	default:
+		return "", "", "", fmt.Errorf("url %q: unsupported scheme (use https/wss/tcp)", p.URL)
+	}
+	path = u.Path
+	if mode == "tcp" {
+		if path != "" && path != "/" {
+			return "", "", "", fmt.Errorf("url %q: tcp services cover a whole host and must not have a path", p.URL)
+		}
+		path = ""
+	} else if path == "" {
+		path = "/"
+	}
+	return mode, host, path, nil
 }
 
 // LoadServer reads and validates a server config file.
@@ -128,23 +168,11 @@ func LoadClient(path string) (*ClientConfig, error) {
 	}
 	for i := range c.Publish {
 		p := &c.Publish[i]
-		if p.Domain == "" {
-			return nil, fmt.Errorf("publish[%d]: domain is required", i)
+		if _, _, _, err := p.Parse(); err != nil {
+			return nil, fmt.Errorf("publish[%d]: %w", i, err)
 		}
-		switch p.Mode {
-		case "http":
-			if len(p.Routes) == 0 {
-				return nil, fmt.Errorf("publish[%d] (%s): http mode requires routes", i, p.Domain)
-			}
-		case "ws":
-			if p.Upstream == "" {
-				return nil, fmt.Errorf("publish[%d] (%s): ws mode requires upstream", i, p.Domain)
-			}
-			if p.Path == "" {
-				p.Path = "/"
-			}
-		default:
-			return nil, fmt.Errorf("publish[%d] (%s): mode must be http or ws", i, p.Domain)
+		if p.Upstream == "" {
+			return nil, fmt.Errorf("publish[%d] (%s): upstream is required", i, p.URL)
 		}
 	}
 	return &c, nil

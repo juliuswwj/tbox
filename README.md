@@ -6,11 +6,18 @@ A VLESS-REALITY tunnel built on [sing-box](https://sing-box.sagernet.org/),
 serving two purposes over one censorship-resistant link that looks like ordinary
 HTTPS traffic to a real site (e.g. `www.microsoft.com`):
 
-1. **Service publishing** — expose local services through the VPS as public
-   HTTPS:
-   - a raw **TCP** service as a **WebSocket** under an HTTPS domain;
-   - an **HTTP** service as a full site or a sub-location, with nginx-style URL
-     and header rewriting.
+1. **Service publishing** — expose local services through the VPS, identified by
+   a URL whose scheme picks the mode:
+   - `https://host/path` — an **HTTP** service as a full site or sub-location,
+     with nginx-style URL/header rewriting;
+   - `wss://host/path` — a raw **TCP** service as a **WebSocket**;
+   - `tcp://host` — a raw **TCP** service as **TLS+TCP** (TLS terminated by SNI,
+     then piped raw — e.g. ssh).
+
+   These coexist under one certificate, e.g. all of `https://dc.example.com/`,
+   `https://app.dc.example.com/location/`, `wss://app.dc.example.com/tunnel/ssh`,
+   and `tcp://ssh.dc.example.com` served by a cert for `[dc.example.com,
+   *.dc.example.com]`.
 2. **SOCKS5H proxy** — a local SOCKS5H port whose traffic egresses from the VPS,
    to get through a monitored gateway.
 
@@ -25,26 +32,32 @@ HTTPS traffic to a real site (e.g. `www.microsoft.com`):
 
 ## How it works
 
-- The **server** owns `:443` with an L4 SNI router. By SNI:
+- The **server** owns `:443` with an L4 SNI router. By SNI host:
+  - a **tcp service** → TLS terminated on the VPS, then raw-piped to the owning
+    client (TLS+TCP);
+  - a host with **http/ws services** → handed to the publish HTTP server, which
+    terminates TLS (cert chosen by SNI) and dispatches by path;
   - the **mimic** host (and unknown/empty SNI, probes) → embedded sing-box
     VLESS-REALITY inbound, which serves authenticated proxy clients and falls
-    back to the genuine mimic site for everyone else;
-  - a **registered publish domain** → TLS-terminated on the VPS (with the
-    client-supplied cert) and reverse-proxied / WS-bridged to the owning client.
+    back to the genuine mimic site for everyone else.
+- **Certs are decoupled from services.** A certificate is matched to a host by
+  its SAN (wildcards supported), so you never repeat the domain in config. Certs
+  may be provided by the **server** (in `server.yaml`, avoiding client-side cert
+  dependencies) or uploaded by a **client**. A service only needs *some* cert
+  whose SAN covers its host.
 - The **client** runs an embedded sing-box (SOCKS5H inbound + VLESS-REALITY
   outbound). Forward proxying is pure sing-box. For publishing it opens one
-  carrier connection to the server through the tunnel and runs a
+  carrier connection through the tunnel and runs a
   [yamux](https://github.com/hashicorp/yamux) session over it, so the server can
-  open reverse streams toward the client per public request.
-- **Multi-client & shared domains**: the server lists several client credentials
-  (one VLESS UUID each). A domain is a table of path-prefix **locations**, each
-  owned by the client that registered it — so different clients can contribute
-  different locations to the **same** domain (e.g. client A serves `/`, client B
-  serves `/b/`). One client provides the TLS cert for the domain; others add
-  cert-free locations. Locations are first-come-first-served at the path level.
-- **Dynamic source-IP whitelist**: each published domain has an atomically
-  swappable CIDR allow list, enforced at L4 and again at the HTTP layer, and
-  changeable at runtime via `tbox whitelist`.
+  open reverse streams toward the client per request.
+- **Multi-client & shared hosts**: the server lists several client credentials
+  (one VLESS UUID each). http/ws services are keyed by `(host, path)` and owned
+  by whichever client registered them, so different clients can serve different
+  locations on the **same** host (first-come-first-served per path); a `tcp` host
+  is owned wholesale.
+- **Dynamic source-IP whitelist**: each service has an atomically swappable CIDR
+  allow list, enforced at L4 and again at the HTTP layer, and changeable at
+  runtime via `tbox whitelist` (keyed by service URL).
 
 ## Build
 
@@ -83,20 +96,21 @@ tbox server -c server.yaml
 client). `add-client` appends a client with a freshly generated UUID and prints
 its token. Re-print existing tokens with `tbox gen-token -c server.yaml`.
 
-On the **client** (local):
+On the **client** (local) — fill `client.yaml` (see
+[`configs/client.example.yaml`](configs/client.example.yaml)) with the token and
+your `publish:` URLs; supply certs there only if the server doesn't:
 
 ```sh
-# fill client.yaml (see configs/client.example.yaml) with the token + your certs
 tbox client -c client.yaml
 
 # forward proxy:
 curl -x socks5h://127.0.0.1:1080 https://ifconfig.me
 
-# runtime whitelist control (talks to the client's admin API):
+# runtime whitelist control, keyed by service URL (talks to the client's admin API):
 tbox whitelist -c client.yaml show
-tbox whitelist -c client.yaml set    app.example.com 203.0.113.0/24
-tbox whitelist -c client.yaml add    app.example.com 198.51.100.7/32
-tbox whitelist -c client.yaml remove app.example.com 203.0.113.0/24
+tbox whitelist -c client.yaml set    tcp://ssh.dc.example.com 203.0.113.0/24
+tbox whitelist -c client.yaml add    tcp://ssh.dc.example.com 198.51.100.7/32
+tbox whitelist -c client.yaml remove tcp://ssh.dc.example.com 203.0.113.0/24
 ```
 
 ## Running as a service

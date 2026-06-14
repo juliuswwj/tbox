@@ -70,17 +70,18 @@ sudo journalctl -u tbox-client -f
 
 ## Let's Encrypt certificates (client)
 
-The published domain's cert/key live on the **client** (it uploads them to the
-server over the tunnel). Point `client.yaml` at them:
+Certs can be provided by the **server** (`server.yaml` `certs:`) — simplest, no
+client-side cert plumbing — or by the **client**, which uploads them over the
+tunnel. To use Let's Encrypt on the client, list the cert under `certs:` (names
+are read from the SAN, so one cert covers all its `publish:` hosts):
 
 ```yaml
+certs:
+  - cert_path: "/etc/tbox/app.example.com.crt"   # fullchain
+    key_path:  "/etc/tbox/app.example.com.key"   # privkey
 publish:
-  - domain: "app.example.com"
-    cert_path: "/etc/tbox/app.example.com.crt"
-    key_path:  "/etc/tbox/app.example.com.key"
-    mode: "http"
-    routes:
-      - { path: "/", upstream: "127.0.0.1:8080" }
+  - url: "https://app.example.com/"
+    upstream: "127.0.0.1:8080"
 ```
 
 Two wrinkles with certbot's output:
@@ -103,7 +104,7 @@ sudo certbot certonly --standalone -d app.example.com \
 ```
 
 It writes `/etc/tbox/<domain>.crt` (fullchain) and `/etc/tbox/<domain>.key`
-(privkey) — set `cert_path`/`key_path` in `client.yaml` to match. Renewals then
+(privkey) — set the `certs:` entry in `client.yaml` to match. Renewals then
 refresh those files and restart `tbox-client` automatically.
 
 > Alternatives: run `tbox-client` as root (drop `User=tbox` and add a

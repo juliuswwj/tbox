@@ -25,41 +25,38 @@ type DialFunc func(ctx context.Context) (net.Conn, error)
 type Client struct {
 	uuid     string
 	dial     DialFunc
+	certs    []CertReg
 	services []ServiceReg
 	logger   *log.Logger
 
 	allowedTargets map[string]bool
 
 	mu         sync.Mutex
-	whitelists map[string][]string // domain -> current allow list
+	whitelists map[string][]string // service id -> current allow list
 	enc        *json.Encoder
 	dec        *json.Decoder
 	connected  bool
 	sendMu     sync.Mutex // serializes request+ack on the control stream
 }
 
-// NewClient builds a control client. services are the published services
-// (already populated with cert/key PEM and initial allow lists).
-func NewClient(uuid string, services []ServiceReg, dial DialFunc, logger *log.Logger) *Client {
+// NewClient builds a control client. certs are the (optional) client-provided
+// certificates; services are the published services with initial allow lists.
+func NewClient(uuid string, certs []CertReg, services []ServiceReg, dial DialFunc, logger *log.Logger) *Client {
 	if logger == nil {
 		logger = log.Default()
 	}
 	targets := make(map[string]bool)
 	whitelists := make(map[string][]string)
 	for _, s := range services {
-		whitelists[s.Domain] = s.Allow
-		for _, r := range s.Routes {
-			if r.Upstream != "" {
-				targets[r.Upstream] = true
-			}
-		}
-		if s.WSUpstream != "" {
-			targets[s.WSUpstream] = true
+		whitelists[s.ID()] = s.Allow
+		if s.Upstream != "" {
+			targets[s.Upstream] = true
 		}
 	}
 	return &Client{
 		uuid:           uuid,
 		dial:           dial,
+		certs:          certs,
 		services:       services,
 		logger:         logger,
 		allowedTargets: targets,
@@ -124,10 +121,10 @@ func (c *Client) session(ctx context.Context) error {
 	if err := c.request(Message{Type: TypeAuth, UUID: c.uuid}); err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
-	if err := c.request(Message{Type: TypeRegister, Services: c.currentServices()}); err != nil {
+	if err := c.request(Message{Type: TypeRegister, Certs: c.certs, Services: c.currentServices()}); err != nil {
 		return fmt.Errorf("register: %w", err)
 	}
-	c.logger.Printf("control: connected and registered %d service(s)", len(c.services))
+	c.logger.Printf("control: connected, registered %d cert(s), %d service(s)", len(c.certs), len(c.services))
 
 	go c.acceptLoop(sess)
 
@@ -177,38 +174,39 @@ func (c *Client) handleReverse(stream net.Conn) {
 	tunnel.Pipe(stream, local)
 }
 
-// UpdateWhitelist sets a domain's allow list and pushes it to the server if
-// connected. The new list persists locally and is replayed on reconnect.
-func (c *Client) UpdateWhitelist(domain string, allow []string) error {
+// UpdateWhitelist sets a service's allow list (by service id, e.g.
+// "https://app.example.com/loc/") and pushes it to the server if connected.
+// The new list persists locally and is replayed on reconnect.
+func (c *Client) UpdateWhitelist(serviceID string, allow []string) error {
 	c.mu.Lock()
-	if _, ok := c.whitelists[domain]; !ok {
+	if _, ok := c.whitelists[serviceID]; !ok {
 		c.mu.Unlock()
-		return fmt.Errorf("unknown domain %q", domain)
+		return fmt.Errorf("unknown service %q", serviceID)
 	}
-	c.whitelists[domain] = allow
+	c.whitelists[serviceID] = allow
 	connected := c.connected
 	c.mu.Unlock()
 	if !connected {
 		return nil // will be replayed on reconnect
 	}
-	return c.request(Message{Type: TypeUpdateWhitelist, Domain: domain, Allow: allow})
+	return c.request(Message{Type: TypeUpdateWhitelist, ServiceID: serviceID, Allow: allow})
 }
 
-// Whitelist returns the current allow list for a domain.
-func (c *Client) Whitelist(domain string) ([]string, bool) {
+// Whitelist returns the current allow list for a service id.
+func (c *Client) Whitelist(serviceID string) ([]string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	v, ok := c.whitelists[domain]
+	v, ok := c.whitelists[serviceID]
 	return v, ok
 }
 
-// Domains returns the published domains.
-func (c *Client) Domains() []string {
+// Services returns the published service ids.
+func (c *Client) Services() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := make([]string, 0, len(c.whitelists))
-	for d := range c.whitelists {
-		out = append(out, d)
+	for id := range c.whitelists {
+		out = append(out, id)
 	}
 	return out
 }
@@ -219,7 +217,7 @@ func (c *Client) currentServices() []ServiceReg {
 	out := make([]ServiceReg, len(c.services))
 	copy(out, c.services)
 	for i := range out {
-		if wl, ok := c.whitelists[out[i].Domain]; ok {
+		if wl, ok := c.whitelists[out[i].ID()]; ok {
 			out[i].Allow = wl
 		}
 	}

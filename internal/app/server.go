@@ -58,6 +58,22 @@ func RunServer(cfg *config.ServerConfig) error {
 	logger.Printf("sing-box VLESS-REALITY inbound on %s (mimic %s)", cfg.RealityInboundAddr, cfg.Mimic)
 
 	reg := control.NewRegistry()
+	for i, cf := range cfg.Certs {
+		certPEM, err := os.ReadFile(cf.CertPath)
+		if err != nil {
+			return fmt.Errorf("certs[%d]: %w", i, err)
+		}
+		keyPEM, err := os.ReadFile(cf.KeyPath)
+		if err != nil {
+			return fmt.Errorf("certs[%d]: %w", i, err)
+		}
+		if err := reg.AddServerCert(string(certPEM), string(keyPEM)); err != nil {
+			return fmt.Errorf("certs[%d]: %w", i, err)
+		}
+	}
+	if len(cfg.Certs) > 0 {
+		logger.Printf("loaded %d server-provided certificate(s)", len(cfg.Certs))
+	}
 	csrv := control.NewServer(reg, clientMap, logger)
 	ctrlLn, err := net.Listen("tcp", cfg.ControlAddr)
 	if err != nil {

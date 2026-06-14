@@ -2,6 +2,7 @@ package control
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"net/netip"
@@ -15,13 +16,13 @@ import (
 	"github.com/juliuswwj/tbox/internal/tunnel"
 )
 
-// RouteEntry is one location (path prefix) on a domain, owned by a single
-// client. Multiple clients may contribute different locations to the same
-// domain; each location forwards to its owner's local upstream.
-type RouteEntry struct {
-	Path     string // public path prefix ("/" = whole site / default)
-	Mode     string // http | ws
-	Upstream string // owner's local target
+// Service is one published service (http location, ws endpoint, or whole-host
+// tcp), owned by the client that registered it and forwarded over its session.
+type Service struct {
+	Mode     string // http | ws | tcp
+	Host     string
+	Path     string // http/ws only
+	Upstream string
 
 	// http rewrite
 	StripPrefix     bool
@@ -30,16 +31,18 @@ type RouteEntry struct {
 	RequestHeaders  map[string]string
 	ResponseHeaders map[string]string
 
-	// owner
 	ClientID string
 	Session  *yamux.Session
-	Allow    *ipallow.Set // shared per (domain, client)
+	Allow    *ipallow.Set
 }
 
-// OpenStream opens a reverse stream to this route's owning client and writes
-// the frame naming the local target the client must dial.
-func (e *RouteEntry) OpenStream(mode tunnel.Mode, target string) (net.Conn, error) {
-	stream, err := e.Session.OpenStream()
+// ID returns the canonical identifier for the service.
+func (s *Service) ID() string { return ServiceID(s.Mode, s.Host, s.Path) }
+
+// OpenStream opens a reverse stream to the owning client and writes the frame
+// naming the local target the client must dial.
+func (s *Service) OpenStream(mode tunnel.Mode, target string) (net.Conn, error) {
+	stream, err := s.Session.OpenStream()
 	if err != nil {
 		return nil, fmt.Errorf("open reverse stream: %w", err)
 	}
@@ -50,259 +53,339 @@ func (e *RouteEntry) OpenStream(mode tunnel.Mode, target string) (net.Conn, erro
 	return stream, nil
 }
 
-// Domain is the server-side state for one published domain. Its TLS cert is
-// supplied by the first registrant that provides one (the "cert owner"); other
-// clients may add cert-free locations.
-type Domain struct {
-	Name string
-
-	mu            sync.RWMutex
-	cert          tls.Certificate
-	hasCert       bool
-	certClient    string
-	routes        []*RouteEntry
-	allowByClient map[string]*ipallow.Set
-	version       atomic.Uint64
+type parsedCert struct {
+	cert     tls.Certificate
+	names    []string // lower-case SAN DNS names (may include *.example.com)
+	clientID string   // "" for server-provided
+	session  *yamux.Session
 }
 
-// Cert returns the domain's TLS certificate.
-func (d *Domain) Cert() (tls.Certificate, bool) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.cert, d.hasCert
+// Registry holds the certificates and services published across all clients.
+// Certificates are decoupled from services: a service only needs some cert
+// (server- or client-provided) whose SAN matches its host.
+type Registry struct {
+	mu      sync.RWMutex
+	certs   []*parsedCert
+	tcp     map[string]*Service   // host -> tcp service
+	http    map[string][]*Service // host -> http/ws services
+	version atomic.Uint64
 }
 
-// Routes returns a snapshot of the domain's routes.
-func (d *Domain) Routes() []*RouteEntry {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	out := make([]*RouteEntry, len(d.routes))
-	copy(out, d.routes)
+// NewRegistry creates an empty registry.
+func NewRegistry() *Registry {
+	return &Registry{tcp: make(map[string]*Service), http: make(map[string][]*Service)}
+}
+
+// Version changes whenever certs/services change; used to invalidate caches.
+func (r *Registry) Version() uint64 { return r.version.Load() }
+
+func parseCert(certPEM, keyPEM string) (*parsedCert, error) {
+	cert, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		return nil, fmt.Errorf("invalid cert/key: %w", err)
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return nil, fmt.Errorf("parse certificate: %w", err)
+	}
+	cert.Leaf = leaf
+	names := append([]string(nil), leaf.DNSNames...)
+	if len(names) == 0 && leaf.Subject.CommonName != "" {
+		names = []string{leaf.Subject.CommonName}
+	}
+	for i := range names {
+		names[i] = strings.ToLower(names[i])
+	}
+	return &parsedCert{cert: cert, names: names}, nil
+}
+
+// AddServerCert registers a permanent, server-provided certificate.
+func (r *Registry) AddServerCert(certPEM, keyPEM string) error {
+	pc, err := parseCert(certPEM, keyPEM)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.certs = append(r.certs, pc)
+	r.version.Add(1)
+	r.mu.Unlock()
+	return nil
+}
+
+// LookupCert returns the certificate whose SAN matches sni (exact preferred,
+// then wildcard).
+func (r *Registry) LookupCert(sni string) (*tls.Certificate, bool) {
+	host := strings.ToLower(strings.TrimSpace(sni))
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, pc := range r.certs {
+		for _, n := range pc.names {
+			if n == host {
+				return &pc.cert, true
+			}
+		}
+	}
+	for _, pc := range r.certs {
+		for _, n := range pc.names {
+			if wildcardMatch(n, host) {
+				return &pc.cert, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// Register replaces a client's certs and services. Hosts/paths are
+// first-come-first-served across clients; a host cannot be both tcp and http.
+func (r *Registry) Register(clientID string, sess *yamux.Session, certs []CertReg, services []ServiceReg) error {
+	// Parse everything up front so a bad entry doesn't partially mutate state.
+	pcs := make([]*parsedCert, 0, len(certs))
+	for _, c := range certs {
+		pc, err := parseCert(c.CertPEM, c.KeyPEM)
+		if err != nil {
+			return err
+		}
+		pc.clientID = clientID
+		pc.session = sess
+		pcs = append(pcs, pc)
+	}
+	svcs := make([]*Service, 0, len(services))
+	for _, sr := range services {
+		allow, err := ipallow.New(sr.Allow)
+		if err != nil {
+			return fmt.Errorf("invalid allow list for %s: %w", sr.ID(), err)
+		}
+		host := strings.ToLower(sr.Host)
+		path := ""
+		if sr.Mode != "tcp" {
+			path = normPath(sr.Path)
+		}
+		svcs = append(svcs, &Service{
+			Mode: sr.Mode, Host: host, Path: path, Upstream: sr.Upstream,
+			StripPrefix: sr.StripPrefix, AddPrefix: sr.AddPrefix, SetHost: sr.SetHost,
+			RequestHeaders: sr.RequestHeaders, ResponseHeaders: sr.ResponseHeaders,
+			ClientID: clientID, Session: sess, Allow: allow,
+		})
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Replace: drop this client's existing certs/services first.
+	r.removeClientLocked(clientID)
+
+	// Conflict checks against other clients' remaining services.
+	for _, s := range svcs {
+		switch s.Mode {
+		case "tcp":
+			if ex, ok := r.tcp[s.Host]; ok && ex.ClientID != clientID {
+				return fmt.Errorf("host %s already used as tcp by another client", s.Host)
+			}
+			if len(r.http[s.Host]) > 0 {
+				return fmt.Errorf("host %s already used for http/ws; cannot also be tcp", s.Host)
+			}
+		case "http", "ws":
+			if _, ok := r.tcp[s.Host]; ok {
+				return fmt.Errorf("host %s already used as tcp; cannot also serve http/ws", s.Host)
+			}
+			for _, ex := range r.http[s.Host] {
+				if samePath(ex.Path, s.Path) {
+					return fmt.Errorf("path %s on %s already registered by another client", s.Path, s.Host)
+				}
+			}
+		default:
+			return fmt.Errorf("unknown mode %q for %s", s.Mode, s.Host)
+		}
+	}
+
+	// Commit.
+	r.certs = append(r.certs, pcs...)
+	for _, s := range svcs {
+		if s.Mode == "tcp" {
+			r.tcp[s.Host] = s
+		} else {
+			r.http[s.Host] = append(r.http[s.Host], s)
+		}
+	}
+	r.version.Add(1)
+	return nil
+}
+
+// removeClientLocked drops all certs/services owned by clientID (caller holds mu).
+func (r *Registry) removeClientLocked(clientID string) {
+	r.certs = filterCerts(r.certs, func(pc *parsedCert) bool { return pc.clientID != clientID })
+	for host, s := range r.tcp {
+		if s.ClientID == clientID {
+			delete(r.tcp, host)
+		}
+	}
+	for host, list := range r.http {
+		kept := list[:0:0]
+		for _, s := range list {
+			if s.ClientID != clientID {
+				kept = append(kept, s)
+			}
+		}
+		if len(kept) == 0 {
+			delete(r.http, host)
+		} else {
+			r.http[host] = kept
+		}
+	}
+}
+
+// UpdateWhitelist atomically replaces a service's allow list.
+func (r *Registry) UpdateWhitelist(clientID, serviceID string, allow []string) error {
+	r.mu.RLock()
+	s := r.findServiceLocked(serviceID)
+	r.mu.RUnlock()
+	if s == nil {
+		return fmt.Errorf("service %s not registered", serviceID)
+	}
+	if s.ClientID != clientID {
+		return fmt.Errorf("service %s not owned by this client", serviceID)
+	}
+	if err := s.Allow.Replace(allow); err != nil {
+		return err
+	}
+	r.version.Add(1)
+	return nil
+}
+
+func (r *Registry) findServiceLocked(serviceID string) *Service {
+	for _, s := range r.tcp {
+		if s.ID() == serviceID {
+			return s
+		}
+	}
+	for _, list := range r.http {
+		for _, s := range list {
+			if s.ID() == serviceID {
+				return s
+			}
+		}
+	}
+	return nil
+}
+
+// TCPService returns the tcp service for a host.
+func (r *Registry) TCPService(host string) (*Service, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	s, ok := r.tcp[strings.ToLower(host)]
+	return s, ok
+}
+
+// HTTPServices returns a snapshot of the http/ws services for a host.
+func (r *Registry) HTTPServices(host string) []*Service {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	list := r.http[strings.ToLower(host)]
+	out := make([]*Service, len(list))
+	copy(out, list)
 	return out
 }
 
-// Version changes whenever the domain's routes/cert change; used to invalidate
-// cached handlers.
-func (d *Domain) Version() uint64 { return d.version.Load() }
+// HasHTTPHost reports whether any http/ws service exists for a host.
+func (r *Registry) HasHTTPHost(host string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.http[strings.ToLower(host)]) > 0
+}
 
-// AllowedConn reports whether addr is permitted by at least one route's
-// whitelist (coarse L4 gate; precise per-route enforcement happens at HTTP).
-func (d *Domain) AllowedConn(remote net.Addr) bool {
-	host, _, err := net.SplitHostPort(remote.String())
-	if err != nil {
-		host = remote.String()
-	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
+// HTTPHostAllowed reports whether remote is admitted by any http/ws service on
+// the host (coarse L4 gate; precise per-service checks happen at HTTP).
+func (r *Registry) HTTPHostAllowed(host string, remote net.Addr) bool {
+	addr, ok := addrOf(remote)
+	if !ok {
 		return false
 	}
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	if len(d.allowByClient) == 0 {
-		return true
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	list := r.http[strings.ToLower(host)]
+	if len(list) == 0 {
+		return false
 	}
-	for _, set := range d.allowByClient {
-		if set.Allowed(addr) {
+	for _, s := range list {
+		if s.Allow.Allowed(addr) {
 			return true
 		}
 	}
 	return false
 }
 
-// Registry tracks published domains across all connected clients.
-type Registry struct {
-	mu      sync.RWMutex
-	domains map[string]*Domain
-}
-
-// NewRegistry creates an empty registry.
-func NewRegistry() *Registry {
-	return &Registry{domains: make(map[string]*Domain)}
-}
-
-// Register adds (or replaces) a client's locations on a domain. Locations are
-// first-come-first-served at the path level across distinct clients; a client
-// re-registering replaces its own locations. The domain's cert is set from the
-// first registration that carries one.
-func (r *Registry) Register(clientID string, sess *yamux.Session, reg ServiceReg) error {
-	name := strings.ToLower(reg.Domain)
-
-	allow, err := ipallow.New(reg.Allow)
-	if err != nil {
-		return fmt.Errorf("invalid allow list for %s: %w", name, err)
-	}
-
-	var cert tls.Certificate
-	hasCert := false
-	if reg.CertPEM != "" {
-		cert, err = tls.X509KeyPair([]byte(reg.CertPEM), []byte(reg.KeyPEM))
-		if err != nil {
-			return fmt.Errorf("invalid cert/key for %s: %w", name, err)
-		}
-		hasCert = true
-	}
-
-	newRoutes, err := buildRoutes(clientID, sess, allow, reg)
-	if err != nil {
-		return err
-	}
-
-	r.mu.Lock()
-	d := r.domains[name]
-	if d == nil {
-		d = &Domain{Name: name, allowByClient: make(map[string]*ipallow.Set)}
-		r.domains[name] = d
-	}
-	r.mu.Unlock()
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	// Path conflicts against OTHER clients' locations.
-	for _, nr := range newRoutes {
-		for _, ex := range d.routes {
-			if ex.ClientID != clientID && samePath(ex.Path, nr.Path) {
-				return fmt.Errorf("path %q on domain %s already registered by another client", nr.Path, name)
-			}
-		}
-	}
-
-	// Replace this client's existing locations (handles reconnect/re-register).
-	kept := d.routes[:0:0]
-	for _, ex := range d.routes {
-		if ex.ClientID != clientID {
-			kept = append(kept, ex)
-		}
-	}
-	d.routes = append(kept, newRoutes...)
-	d.allowByClient[clientID] = allow
-
-	if hasCert && (!d.hasCert || d.certClient == clientID) {
-		d.cert = cert
-		d.hasCert = true
-		d.certClient = clientID
-	}
-	d.version.Add(1)
-	return nil
-}
-
-func buildRoutes(clientID string, sess *yamux.Session, allow *ipallow.Set, reg ServiceReg) ([]*RouteEntry, error) {
-	switch reg.Mode {
-	case "http":
-		if len(reg.Routes) == 0 {
-			return nil, fmt.Errorf("http registration for %s has no routes", reg.Domain)
-		}
-		out := make([]*RouteEntry, 0, len(reg.Routes))
-		for _, rt := range reg.Routes {
-			out = append(out, &RouteEntry{
-				Path:            normPath(rt.Path),
-				Mode:            "http",
-				Upstream:        rt.Upstream,
-				StripPrefix:     rt.StripPrefix,
-				AddPrefix:       rt.AddPrefix,
-				SetHost:         rt.SetHost,
-				RequestHeaders:  rt.RequestHeaders,
-				ResponseHeaders: rt.ResponseHeaders,
-				ClientID:        clientID,
-				Session:         sess,
-				Allow:           allow,
-			})
-		}
-		return out, nil
-	case "ws":
-		return []*RouteEntry{{
-			Path:     normPath(reg.WSPath),
-			Mode:     "ws",
-			Upstream: reg.WSUpstream,
-			ClientID: clientID,
-			Session:  sess,
-			Allow:    allow,
-		}}, nil
-	default:
-		return nil, fmt.Errorf("unknown mode %q for %s", reg.Mode, reg.Domain)
-	}
-}
-
-// UpdateWhitelist atomically replaces the allow list for a client's locations
-// on a domain.
-func (r *Registry) UpdateWhitelist(clientID, domain string, allow []string) error {
-	d, ok := r.Lookup(domain)
-	if !ok {
-		return fmt.Errorf("domain %s not registered", domain)
-	}
-	d.mu.RLock()
-	set, ok := d.allowByClient[clientID]
-	d.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("no locations on %s owned by this client", domain)
-	}
-	if err := set.Replace(allow); err != nil {
-		return err
-	}
-	d.version.Add(1)
-	return nil
-}
-
-// Lookup returns the domain state.
-func (r *Registry) Lookup(domain string) (*Domain, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	d, ok := r.domains[strings.ToLower(domain)]
-	return d, ok
-}
-
-// Has reports whether a domain is registered (has at least one route).
-func (r *Registry) Has(domain string) bool {
-	_, ok := r.Lookup(domain)
-	return ok
-}
-
-// RemoveSession removes all locations owned by the given session and drops any
-// domain left with no routes. Returns the affected domain names.
+// RemoveSession removes all certs/services owned by a session (on disconnect).
 func (r *Registry) RemoveSession(sess *yamux.Session) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var affected []string
-	for name, d := range r.domains {
-		d.mu.Lock()
-		changed := false
-		kept := d.routes[:0:0]
-		for _, e := range d.routes {
-			if e.Session == sess {
+	before := len(r.certs)
+	r.certs = filterCerts(r.certs, func(pc *parsedCert) bool { return pc.session != sess })
+	changed := len(r.certs) != before
+	for host, s := range r.tcp {
+		if s.Session == sess {
+			delete(r.tcp, host)
+			affected = append(affected, s.ID())
+			changed = true
+		}
+	}
+	for host, list := range r.http {
+		kept := list[:0:0]
+		for _, s := range list {
+			if s.Session == sess {
+				affected = append(affected, s.ID())
 				changed = true
 			} else {
-				kept = append(kept, e)
+				kept = append(kept, s)
 			}
 		}
-		if changed {
-			d.routes = kept
-			// Drop allow sets for clients with no remaining routes.
-			live := make(map[string]bool)
-			for _, e := range d.routes {
-				live[e.ClientID] = true
-			}
-			for cid := range d.allowByClient {
-				if !live[cid] {
-					delete(d.allowByClient, cid)
-				}
-			}
-			d.version.Add(1)
-			affected = append(affected, name)
+		if len(kept) == 0 {
+			delete(r.http, host)
+		} else {
+			r.http[host] = kept
 		}
-		empty := len(d.routes) == 0
-		d.mu.Unlock()
-		if empty {
-			delete(r.domains, name)
-		}
+	}
+	if changed {
+		r.version.Add(1)
 	}
 	return affected
 }
 
-func samePath(a, b string) bool { return normPath(a) == normPath(b) }
-
-func normPath(p string) string {
-	if p == "" {
-		return "/"
+func filterCerts(in []*parsedCert, keep func(*parsedCert) bool) []*parsedCert {
+	out := in[:0:0]
+	for _, pc := range in {
+		if keep(pc) {
+			out = append(out, pc)
+		}
 	}
-	return p
+	return out
 }
+
+func addrOf(remote net.Addr) (netip.Addr, bool) {
+	host, _, err := net.SplitHostPort(remote.String())
+	if err != nil {
+		host = remote.String()
+	}
+	a, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return a, true
+}
+
+// wildcardMatch reports whether a cert name (possibly *.example.com) matches host.
+func wildcardMatch(name, host string) bool {
+	if name == host {
+		return true
+	}
+	if strings.HasPrefix(name, "*.") {
+		suffix := name[1:] // ".example.com"
+		if strings.HasSuffix(host, suffix) {
+			label := host[:len(host)-len(suffix)]
+			return label != "" && !strings.Contains(label, ".")
+		}
+	}
+	return false
+}
+
+func samePath(a, b string) bool { return normPath(a) == normPath(b) }

@@ -27,27 +27,27 @@ func WhitelistShow(adminAddr string) error {
 		return err
 	}
 	if len(entries) == 0 {
-		fmt.Println("(no published domains)")
+		fmt.Println("(no published services)")
 		return nil
 	}
 	for _, e := range entries {
 		if len(e.Allow) == 0 {
-			fmt.Printf("%s\tallow-all\n", e.Domain)
+			fmt.Printf("%s\tallow-all\n", e.Service)
 		} else {
-			fmt.Printf("%s\t%v\n", e.Domain, e.Allow)
+			fmt.Printf("%s\t%v\n", e.Service, e.Allow)
 		}
 	}
 	return nil
 }
 
-// WhitelistSet replaces a domain's allow list.
-func WhitelistSet(adminAddr, domain string, allow []string) error {
-	return postWhitelist(adminAddr, AdminWhitelistRequest{Domain: domain, Allow: allow})
+// WhitelistSet replaces a service's allow list.
+func WhitelistSet(adminAddr, service string, allow []string) error {
+	return postWhitelist(adminAddr, AdminWhitelistRequest{Service: service, Allow: allow})
 }
 
-// WhitelistAdd adds CIDRs to a domain's current allow list.
-func WhitelistAdd(adminAddr, domain string, add []string) error {
-	cur, err := fetchAllow(adminAddr, domain)
+// WhitelistAdd adds CIDRs to a service's current allow list.
+func WhitelistAdd(adminAddr, service string, add []string) error {
+	cur, err := fetchAllow(adminAddr, service)
 	if err != nil {
 		return err
 	}
@@ -59,12 +59,12 @@ func WhitelistAdd(adminAddr, domain string, add []string) error {
 			merged = append(merged, c)
 		}
 	}
-	return postWhitelist(adminAddr, AdminWhitelistRequest{Domain: domain, Allow: merged})
+	return postWhitelist(adminAddr, AdminWhitelistRequest{Service: service, Allow: merged})
 }
 
-// WhitelistRemove removes CIDRs from a domain's current allow list.
-func WhitelistRemove(adminAddr, domain string, remove []string) error {
-	cur, err := fetchAllow(adminAddr, domain)
+// WhitelistRemove removes CIDRs from a service's current allow list.
+func WhitelistRemove(adminAddr, service string, remove []string) error {
+	cur, err := fetchAllow(adminAddr, service)
 	if err != nil {
 		return err
 	}
@@ -78,10 +78,10 @@ func WhitelistRemove(adminAddr, domain string, remove []string) error {
 			kept = append(kept, c)
 		}
 	}
-	return postWhitelist(adminAddr, AdminWhitelistRequest{Domain: domain, Allow: kept})
+	return postWhitelist(adminAddr, AdminWhitelistRequest{Service: service, Allow: kept})
 }
 
-func fetchAllow(adminAddr, domain string) ([]string, error) {
+func fetchAllow(adminAddr, service string) ([]string, error) {
 	resp, err := adminClient.Get(adminURL(adminAddr))
 	if err != nil {
 		return nil, err
@@ -92,11 +92,11 @@ func fetchAllow(adminAddr, domain string) ([]string, error) {
 		return nil, err
 	}
 	for _, e := range entries {
-		if e.Domain == domain {
+		if e.Service == service {
 			return e.Allow, nil
 		}
 	}
-	return nil, fmt.Errorf("domain %q not found", domain)
+	return nil, fmt.Errorf("service %q not found", service)
 }
 
 func postWhitelist(adminAddr string, req AdminWhitelistRequest) error {

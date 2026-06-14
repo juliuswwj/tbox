@@ -20,22 +20,22 @@ func pathHasPrefix(reqPath, prefix string) bool {
 	return strings.HasPrefix(reqPath, prefix+"/")
 }
 
-// applyRequestRewrite rewrites the outbound request URL/headers per the route,
+// applyRequestRewrite rewrites the outbound request URL/headers per the service,
 // nginx-proxy_pass style. origHost is the public Host as received.
-func applyRequestRewrite(req *http.Request, route *control.RouteEntry, origHost string) {
+func applyRequestRewrite(req *http.Request, svc *control.Service, origHost string) {
 	path := req.URL.Path
-	if route.StripPrefix && route.Path != "" && route.Path != "/" {
-		trimmed := strings.TrimSuffix(route.Path, "/")
+	if svc.StripPrefix && svc.Path != "" && svc.Path != "/" {
+		trimmed := strings.TrimSuffix(svc.Path, "/")
 		path = strings.TrimPrefix(path, trimmed)
 		if !strings.HasPrefix(path, "/") {
 			path = "/" + path
 		}
 	}
-	if route.AddPrefix != "" {
-		path = strings.TrimSuffix(route.AddPrefix, "/") + path
+	if svc.AddPrefix != "" {
+		path = strings.TrimSuffix(svc.AddPrefix, "/") + path
 	}
 	req.URL.Scheme = "http"
-	req.URL.Host = route.Upstream
+	req.URL.Host = svc.Upstream
 	req.URL.Path = path
 	req.URL.RawPath = "" // let net/http re-encode from Path
 
@@ -45,13 +45,13 @@ func applyRequestRewrite(req *http.Request, route *control.RouteEntry, origHost 
 		req.Header.Set("X-Forwarded-Host", origHost)
 	}
 
-	if route.SetHost != "" {
-		req.Host = route.SetHost
+	if svc.SetHost != "" {
+		req.Host = svc.SetHost
 	} else {
-		req.Host = route.Upstream
+		req.Host = svc.Upstream
 	}
 
-	for k, v := range route.RequestHeaders {
+	for k, v := range svc.RequestHeaders {
 		if v == "" {
 			req.Header.Del(k)
 		} else {
@@ -60,9 +60,9 @@ func applyRequestRewrite(req *http.Request, route *control.RouteEntry, origHost 
 	}
 }
 
-// applyResponseRewrite mutates response headers per the route.
-func applyResponseRewrite(resp *http.Response, route *control.RouteEntry) {
-	for k, v := range route.ResponseHeaders {
+// applyResponseRewrite mutates response headers per the service.
+func applyResponseRewrite(resp *http.Response, svc *control.Service) {
+	for k, v := range svc.ResponseHeaders {
 		if v == "" {
 			resp.Header.Del(k)
 		} else {

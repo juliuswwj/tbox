@@ -90,29 +90,23 @@ func (s *Server) handleSession(conn net.Conn) {
 			_ = enc.Encode(ack(true, ""))
 
 		case TypeRegister:
-			var errs []string
-			var okDomains []string
+			if err := s.reg.Register(clientID, sess, msg.Certs, msg.Services); err != nil {
+				_ = enc.Encode(ack(false, err.Error()))
+				break
+			}
+			ids := make([]string, 0, len(msg.Services))
 			for _, svc := range msg.Services {
-				if err := s.reg.Register(clientID, sess, svc); err != nil {
-					errs = append(errs, err.Error())
-				} else {
-					okDomains = append(okDomains, svc.Domain)
-				}
+				ids = append(ids, svc.ID())
 			}
-			if len(okDomains) > 0 {
-				s.logger.Printf("control: client %s published: %s", shortID(clientID), strings.Join(okDomains, ", "))
-			}
-			if len(errs) > 0 {
-				_ = enc.Encode(ack(false, strings.Join(errs, "; ")))
-			} else {
-				_ = enc.Encode(ack(true, ""))
-			}
+			s.logger.Printf("control: client %s registered %d cert(s), services: %s",
+				shortID(clientID), len(msg.Certs), strings.Join(ids, ", "))
+			_ = enc.Encode(ack(true, ""))
 
 		case TypeUpdateWhitelist:
-			if err := s.reg.UpdateWhitelist(clientID, msg.Domain, msg.Allow); err != nil {
+			if err := s.reg.UpdateWhitelist(clientID, msg.ServiceID, msg.Allow); err != nil {
 				_ = enc.Encode(ack(false, err.Error()))
 			} else {
-				s.logger.Printf("control: client %s whitelist for %s -> %v", shortID(clientID), msg.Domain, msg.Allow)
+				s.logger.Printf("control: client %s whitelist for %s -> %v", shortID(clientID), msg.ServiceID, msg.Allow)
 				_ = enc.Encode(ack(true, ""))
 			}
 

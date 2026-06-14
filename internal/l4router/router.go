@@ -1,8 +1,13 @@
 // Package l4router owns the public :443 listener. It peeks the TLS SNI of each
-// connection and routes it: registered publish domains are TLS-terminated and
-// served by the publish layer; everything else (the mimic host, probes, unknown
-// SNI) is replayed to the embedded sing-box VLESS-REALITY inbound, which serves
-// real proxy clients and falls back to the genuine mimic site for everyone else.
+// connection and routes by host:
+//
+//   - a registered tcp service -> TLS terminated here, then raw-piped to the
+//     owning client (TLS+TCP, e.g. ssh);
+//   - a host with http/ws services -> handed to the publish HTTP server, which
+//     terminates TLS (cert chosen by SNI) and dispatches by path;
+//   - everything else (the mimic host, probes, unknown SNI) -> replayed to the
+//     embedded sing-box VLESS-REALITY inbound, which serves real proxy clients
+//     and falls back to the genuine mimic site for everyone else.
 package l4router
 
 import (
@@ -35,7 +40,7 @@ type Router struct {
 	httpSrv   *http.Server
 
 	mu      sync.Mutex
-	handler map[string]*cachedHandler // domain -> cached publish handler
+	handler map[string]*cachedHandler // host -> cached publish handler
 }
 
 type cachedHandler struct {
@@ -96,26 +101,57 @@ func (r *Router) handle(conn net.Conn) {
 		r.toReality(replayed)
 		return
 	}
-	domain := strings.ToLower(strings.TrimSpace(sni))
+	host := strings.ToLower(strings.TrimSpace(sni))
 
-	dom, ok := r.reg.Lookup(domain)
+	if svc, ok := r.reg.TCPService(host); ok {
+		r.handleTCP(svc, replayed, conn.RemoteAddr())
+		return
+	}
+	if r.reg.HasHTTPHost(host) {
+		if !r.reg.HTTPHostAllowed(host, conn.RemoteAddr()) {
+			r.logger.Printf("l4: blocked %s -> %s (not in any whitelist)", conn.RemoteAddr(), host)
+			_ = replayed.Close()
+			return
+		}
+		r.publishLn.push(replayed)
+		return
+	}
+	// Mimic host, unknown SNI, or empty SNI: let REALITY handle it.
+	r.toReality(replayed)
+}
+
+// handleTCP terminates TLS for a whole-host tcp service and raw-pipes the
+// decrypted stream to the owning client.
+func (r *Router) handleTCP(svc *control.Service, conn net.Conn, remote net.Addr) {
+	if !svc.Allow.AllowedConn(remote) {
+		r.logger.Printf("l4: blocked %s -> tcp://%s (not in whitelist)", remote, svc.Host)
+		_ = conn.Close()
+		return
+	}
+	cert, ok := r.reg.LookupCert(svc.Host)
 	if !ok {
-		// Mimic host, unknown SNI, or empty SNI: let REALITY handle it.
-		r.toReality(replayed)
+		r.logger.Printf("l4: no certificate for tcp://%s", svc.Host)
+		_ = conn.Close()
 		return
 	}
-
-	// Coarse source-IP gate at L4 (pre-TLS): allow if any location on the
-	// domain would admit this peer; precise per-location enforcement happens at
-	// the HTTP layer. Dropping here avoids revealing the site to peers no
-	// location admits.
-	if !dom.AllowedConn(conn.RemoteAddr()) {
-		r.logger.Printf("l4: blocked %s -> %s (not in any whitelist)", conn.RemoteAddr(), domain)
-		_ = replayed.Close()
+	tlsConn := tls.Server(conn, &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{*cert},
+	})
+	_ = tlsConn.SetDeadline(time.Now().Add(15 * time.Second))
+	if err := tlsConn.Handshake(); err != nil {
+		_ = tlsConn.Close()
 		return
 	}
+	_ = tlsConn.SetDeadline(time.Time{})
 
-	r.publishLn.push(replayed)
+	stream, err := svc.OpenStream(tunnel.ModeTCP, svc.Upstream)
+	if err != nil {
+		r.logger.Printf("l4: tcp://%s open stream to %s: %v", svc.Host, svc.Upstream, err)
+		_ = tlsConn.Close()
+		return
+	}
+	tunnel.Pipe(tlsConn, stream)
 }
 
 // toReality splices a connection to the embedded sing-box reality inbound.
@@ -129,47 +165,42 @@ func (r *Router) toReality(conn net.Conn) {
 	tunnel.Pipe(conn, upstream)
 }
 
-// getCertificate selects the cert for a registered domain during the publish
-// TLS handshake.
+// getCertificate selects the cert matching the SNI during the publish TLS handshake.
 func (r *Router) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	dom, ok := r.reg.Lookup(hello.ServerName)
+	cert, ok := r.reg.LookupCert(hello.ServerName)
 	if !ok {
 		return nil, errors.New("no certificate for " + hello.ServerName)
 	}
-	cert, ok := dom.Cert()
-	if !ok {
-		return nil, errors.New("no certificate registered for " + hello.ServerName)
-	}
-	return &cert, nil
+	return cert, nil
 }
 
 // serveHTTP dispatches an already-TLS-terminated request to the publish handler
-// for its SNI.
+// for its SNI host.
 func (r *Router) serveHTTP(w http.ResponseWriter, req *http.Request) {
 	if req.TLS == nil {
 		http.Error(w, "TLS required", http.StatusBadRequest)
 		return
 	}
-	domain := strings.ToLower(req.TLS.ServerName)
-	dom, ok := r.reg.Lookup(domain)
-	if !ok {
+	host := strings.ToLower(req.TLS.ServerName)
+	services := r.reg.HTTPServices(host)
+	if len(services) == 0 {
 		http.NotFound(w, req)
 		return
 	}
-	r.handlerFor(domain, dom).ServeHTTP(w, req)
+	r.handlerFor(host, services).ServeHTTP(w, req)
 }
 
-// handlerFor returns a cached publish handler for the domain, rebuilding it
-// whenever the domain's routes/cert change (tracked by Version).
-func (r *Router) handlerFor(domain string, dom *control.Domain) *publish.Handler {
-	v := dom.Version()
+// handlerFor returns a cached publish handler for the host, rebuilding it
+// whenever the registry changes (tracked by Version).
+func (r *Router) handlerFor(host string, services []*control.Service) *publish.Handler {
+	v := r.reg.Version()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if c, ok := r.handler[domain]; ok && c.version == v {
+	if c, ok := r.handler[host]; ok && c.version == v {
 		return c.h
 	}
-	h := publish.NewHandler(dom, r.logger)
-	r.handler[domain] = &cachedHandler{version: v, h: h}
+	h := publish.NewHandler(services, r.logger)
+	r.handler[host] = &cachedHandler{version: v, h: h}
 	return h
 }
 

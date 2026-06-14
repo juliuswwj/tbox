@@ -11,8 +11,8 @@ import (
 )
 
 // serveWS upgrades the request to a WebSocket and bridges its binary payload to
-// a raw reverse stream toward the location owner's local TCP service.
-func (h *Handler) serveWS(w http.ResponseWriter, r *http.Request, entry *control.RouteEntry) {
+// a raw reverse stream toward the service owner's local TCP service.
+func (h *Handler) serveWS(w http.ResponseWriter, r *http.Request, svc *control.Service) {
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		// Published endpoints are reached by arbitrary public clients; origin
 		// enforcement is out of scope for the tunnel.
@@ -23,9 +23,9 @@ func (h *Handler) serveWS(w http.ResponseWriter, r *http.Request, entry *control
 		return
 	}
 
-	stream, err := entry.OpenStream(tunnel.ModeTCP, entry.Upstream)
+	stream, err := svc.OpenStream(tunnel.ModeTCP, svc.Upstream)
 	if err != nil {
-		h.logger.Printf("publish: ws %s open stream to %s: %v", r.Host, entry.Upstream, err)
+		h.logger.Printf("publish: ws %s open stream to %s: %v", r.Host, svc.Upstream, err)
 		_ = c.Close(websocket.StatusInternalError, "upstream unavailable")
 		return
 	}

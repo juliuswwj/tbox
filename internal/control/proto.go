@@ -24,42 +24,61 @@ type Message struct {
 	UUID string `json:"uuid,omitempty"`
 
 	// register
+	Certs    []CertReg    `json:"certs,omitempty"`
 	Services []ServiceReg `json:"services,omitempty"`
 
 	// update_whitelist
-	Domain string   `json:"domain,omitempty"`
-	Allow  []string `json:"allow,omitempty"`
+	ServiceID string   `json:"service_id,omitempty"`
+	Allow     []string `json:"allow,omitempty"`
 
 	// ack
 	OK    bool   `json:"ok,omitempty"`
 	Error string `json:"error,omitempty"`
 }
 
-// ServiceReg is a single published service the client registers.
-type ServiceReg struct {
-	Domain  string   `json:"domain"`
-	Mode    string   `json:"mode"` // http | ws
-	CertPEM string   `json:"cert_pem"`
-	KeyPEM  string   `json:"key_pem"`
-	Allow   []string `json:"allow,omitempty"`
-
-	// http mode
-	Routes []RouteReg `json:"routes,omitempty"`
-
-	// ws mode
-	WSPath     string `json:"ws_path,omitempty"`
-	WSUpstream string `json:"ws_upstream,omitempty"`
+// CertReg is a TLS certificate a client uploads. The covered names are read
+// from the certificate itself.
+type CertReg struct {
+	CertPEM string `json:"cert_pem"`
+	KeyPEM  string `json:"key_pem"`
 }
 
-// RouteReg mirrors config.Route over the wire.
-type RouteReg struct {
-	Path            string            `json:"path"`
-	Upstream        string            `json:"upstream"`
+// ServiceReg is one published service registered by a client.
+type ServiceReg struct {
+	Mode     string   `json:"mode"` // http | ws | tcp
+	Host     string   `json:"host"`
+	Path     string   `json:"path,omitempty"` // http/ws only
+	Upstream string   `json:"upstream"`
+	Allow    []string `json:"allow,omitempty"`
+
+	// http rewrite
 	StripPrefix     bool              `json:"strip_prefix,omitempty"`
 	AddPrefix       string            `json:"add_prefix,omitempty"`
 	SetHost         string            `json:"set_host,omitempty"`
 	RequestHeaders  map[string]string `json:"request_headers,omitempty"`
 	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
+}
+
+// ID returns the canonical identifier for the service.
+func (s ServiceReg) ID() string { return ServiceID(s.Mode, s.Host, s.Path) }
+
+// ServiceID is the canonical URL-style identifier for a service.
+func ServiceID(mode, host, path string) string {
+	switch mode {
+	case "tcp":
+		return "tcp://" + host
+	case "ws":
+		return "wss://" + host + normPath(path)
+	default:
+		return "https://" + host + normPath(path)
+	}
+}
+
+func normPath(p string) string {
+	if p == "" {
+		return "/"
+	}
+	return p
 }
 
 func ack(ok bool, errMsg string) Message {

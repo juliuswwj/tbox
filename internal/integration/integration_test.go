@@ -1,12 +1,14 @@
 //go:build with_utls
 
-// Package integration drives a full loopback round trip: a tbox server and one
-// or more tbox clients connected over a real VLESS-REALITY tunnel (mimicking
-// www.microsoft.com), exercising the SOCKS5H proxy, HTTP publishing with
-// rewrites, WebSocket publishing, dynamic whitelists, and multi-client.
+// Package integration drives a full loopback round trip: a tbox server and two
+// tbox clients connected over a real VLESS-REALITY tunnel (mimicking
+// www.microsoft.com). It exercises the SOCKS5H proxy and all publish modes
+// (HTTP, WebSocket, TLS+TCP) served under a single server-provided wildcard
+// cert, plus a shared host across clients and a dynamic whitelist.
 package integration
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -45,7 +47,6 @@ func TestEndToEnd(t *testing.T) {
 		logger = log.New(log.Writer(), "", log.LstdFlags)
 	}
 
-	// REALITY parameters shared by server and clients.
 	kp, err := token.GenerateKeypair()
 	must(t, err)
 	shortID, err := token.GenerateShortID()
@@ -53,18 +54,14 @@ func TestEndToEnd(t *testing.T) {
 	uuidA, _ := token.GenerateUUID()
 	uuidB, _ := token.GenerateUUID()
 
-	publicPort := freePort(t)
-	realityPort := freePort(t)
-	ctrlPort := freePort(t)
-
-	publicAddr := fmt.Sprintf("127.0.0.1:%d", publicPort)
-	realityAddr := fmt.Sprintf("127.0.0.1:%d", realityPort)
-	ctrlAddr := fmt.Sprintf("127.0.0.1:%d", ctrlPort)
+	publicAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	realityAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	ctrlAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
 
 	// --- server sing-box (VLESS-REALITY inbound) ---
 	srvJSON, err := singbox.ServerConfigJSON(singbox.ServerParams{
 		ListenAddr: "127.0.0.1",
-		ListenPort: uint16(realityPort),
+		ListenPort: portOf(realityAddr),
 		MimicHost:  mimic,
 		MimicPort:  443,
 		PrivateKey: kp.PrivateKey,
@@ -78,8 +75,11 @@ func TestEndToEnd(t *testing.T) {
 	must(t, srvBox.Start())
 	defer srvBox.Close()
 
-	// --- server control plane + L4 router ---
+	// --- server control plane + L4 router, with a server-provided wildcard cert ---
 	reg := control.NewRegistry()
+	cert, key := genCert(t, "dc.example.com", "*.dc.example.com")
+	must(t, reg.AddServerCert(cert, key))
+
 	csrv := control.NewServer(reg, map[string]string{uuidA: "a", uuidB: "b"}, logger)
 	ctrlLn, err := net.Listen("tcp", ctrlAddr)
 	must(t, err)
@@ -90,138 +90,101 @@ func TestEndToEnd(t *testing.T) {
 	go func() { _ = router.ListenAndServe(publicAddr) }()
 	waitDial(t, publicAddr)
 
-	// --- local origin services (what clients publish) ---
-	originAddr := startOriginHTTP(t)         // HTTP app for client A
-	echoAddr := startEchoTCP(t)              // raw TCP echo for WS publish (client A)
-	originBAddr := startOriginHTTP(t)        // HTTP app for client B
-	sharedOriginA := startOrigin(t, "Aroot") // shared.test "/" served by A
-	sharedOriginB := startOrigin(t, "Bsub")  // shared.test "/b/" served by B
+	// --- local origin services ---
+	originApex := startOrigin(t, "Aroot") // https://dc.example.com/
+	originLoc := startOrigin(t, "loc")    // https://app.dc.example.com/location/
+	originTeamB := startOrigin(t, "Bsub") // https://app.dc.example.com/teamb/ (client B)
+	echoWS := startEchoTCP(t)             // wss://app.dc.example.com/tunnel/ssh
+	echoTCP := startEchoTCP(t)            // tcp://ssh.dc.example.com
 
-	// certs for the published domains
-	certApp, keyApp := genCert(t, "app.test")
-	certWS, keyWS := genCert(t, "ws.test")
-	certB, keyB := genCert(t, "b.test")
-	certShared, keyShared := genCert(t, "shared.test")
-
-	// --- client A: publishes app.test (http, with rewrite) and ws.test (ws) ---
+	// --- client A: apex http, sub-location http (rewrite), ws, and tcp ---
 	socksA := fmt.Sprintf("127.0.0.1:%d", freePort(t))
 	servicesA := []control.ServiceReg{
-		{
-			Domain: "app.test", Mode: "http", CertPEM: certApp, KeyPEM: keyApp,
-			Routes: []control.RouteReg{{
-				Path: "/api/", Upstream: originAddr, StripPrefix: true,
-				SetHost: "origin.internal", RequestHeaders: map[string]string{"X-Test": "hello"},
-			}, {
-				Path: "/", Upstream: originAddr,
-			}},
-		},
-		{Domain: "ws.test", Mode: "ws", CertPEM: certWS, KeyPEM: keyWS, WSPath: "/tunnel", WSUpstream: echoAddr},
-		// Shared domain: A owns the cert and serves the root location.
-		{Domain: "shared.test", Mode: "http", CertPEM: certShared, KeyPEM: keyShared,
-			Routes: []control.RouteReg{{Path: "/", Upstream: sharedOriginA}}},
+		{Mode: "http", Host: "dc.example.com", Path: "/", Upstream: originApex},
+		{Mode: "http", Host: "app.dc.example.com", Path: "/location/", Upstream: originLoc,
+			StripPrefix: true, SetHost: "app.internal", RequestHeaders: map[string]string{"X-Test": "hello"}},
+		{Mode: "ws", Host: "app.dc.example.com", Path: "/tunnel/ssh", Upstream: echoWS},
+		{Mode: "tcp", Host: "ssh.dc.example.com", Upstream: echoTCP, Allow: []string{"203.0.113.0/24"}},
 	}
-	startClient(t, socksA, publicAddr, uuidA, kp.PublicKey, shortID, ctrlAddr, servicesA, logger)
+	ccA := startClient(t, socksA, publicAddr, uuidA, kp.PublicKey, shortID, ctrlAddr, nil, servicesA, logger)
 
-	// --- client B: publishes b.test, with an initial whitelist that blocks all ---
+	// --- client B: a sub-location on the SAME shared host, no cert ---
 	socksB := fmt.Sprintf("127.0.0.1:%d", freePort(t))
 	servicesB := []control.ServiceReg{
-		{Domain: "b.test", Mode: "http", CertPEM: certB, KeyPEM: keyB, Allow: []string{"203.0.113.0/24"},
-			Routes: []control.RouteReg{{Path: "/", Upstream: originBAddr}}},
-		// Shared domain: B adds a cert-free sub-location under A's domain.
-		{Domain: "shared.test", Mode: "http",
-			Routes: []control.RouteReg{{Path: "/b/", Upstream: sharedOriginB, StripPrefix: true}}},
+		{Mode: "http", Host: "app.dc.example.com", Path: "/teamb/", Upstream: originTeamB, StripPrefix: true},
 	}
-	ccB := startClient(t, socksB, publicAddr, uuidB, kp.PublicKey, shortID, ctrlAddr, servicesB, logger)
+	startClient(t, socksB, publicAddr, uuidB, kp.PublicKey, shortID, ctrlAddr, nil, servicesB, logger)
 
-	// Wait for both clients to register all domains.
-	waitRegistered(t, reg, "app.test", "ws.test", "b.test", "shared.test")
-	waitRoutes(t, reg, "shared.test", 2)
+	waitFor(t, func() bool {
+		return reg.HasHTTPHost("dc.example.com") &&
+			len(reg.HTTPServices("app.dc.example.com")) >= 3 &&
+			tcpExists(reg, "ssh.dc.example.com")
+	})
 
 	t.Run("forward-socks5h", func(t *testing.T) {
-		body := socksGet(t, socksA, "http://"+originAddr+"/hello")
+		body := socksGet(t, socksA, "http://"+originApex+"/hello")
 		if !strings.Contains(body, "ORIGIN-OK") {
 			t.Fatalf("socks proxy body = %q", body)
 		}
 	})
 
-	t.Run("http-publish-fullsite", func(t *testing.T) {
-		body := httpsGet(t, publicAddr, "https://app.test/page")
-		if !strings.Contains(body, "ORIGIN-OK") || !strings.Contains(body, "path=/page") {
-			t.Fatalf("fullsite body = %q", body)
+	t.Run("http-apex", func(t *testing.T) {
+		body := httpsGet(t, publicAddr, "https://dc.example.com/index")
+		if !strings.Contains(body, "label=Aroot") || !strings.Contains(body, "path=/index") {
+			t.Fatalf("apex body = %q", body)
 		}
 	})
 
-	t.Run("http-publish-rewrite-sublocation", func(t *testing.T) {
-		body := httpsGet(t, publicAddr, "https://app.test/api/widgets")
-		// strip_prefix turns /api/widgets into /widgets; SetHost + X-Test applied.
-		if !strings.Contains(body, "path=/widgets") {
-			t.Fatalf("expected stripped path /widgets, got %q", body)
+	t.Run("http-sublocation-rewrite", func(t *testing.T) {
+		body := httpsGet(t, publicAddr, "https://app.dc.example.com/location/widgets")
+		if !strings.Contains(body, "label=loc") || !strings.Contains(body, "path=/widgets") {
+			t.Fatalf("expected stripped /widgets from loc origin, got %q", body)
 		}
-		if !strings.Contains(body, "host=origin.internal") {
-			t.Fatalf("expected rewritten host, got %q", body)
-		}
-		if !strings.Contains(body, "xtest=hello") {
-			t.Fatalf("expected injected header, got %q", body)
-		}
-		if !strings.Contains(body, "xfh=app.test") {
-			t.Fatalf("expected X-Forwarded-Host=app.test, got %q", body)
+		if !strings.Contains(body, "host=app.internal") || !strings.Contains(body, "xtest=hello") {
+			t.Fatalf("expected rewritten host + injected header, got %q", body)
 		}
 	})
 
-	t.Run("ws-publish", func(t *testing.T) {
-		echoOverWS(t, publicAddr, "wss://ws.test/tunnel", "ping-123")
+	t.Run("ws", func(t *testing.T) {
+		echoOverWS(t, publicAddr, "wss://app.dc.example.com/tunnel/ssh", "ping-123")
 	})
 
-	t.Run("whitelist-dynamic", func(t *testing.T) {
-		// Initially b.test only allows 203.0.113.0/24 -> our loopback is blocked.
-		if _, err := tryHTTPS(publicAddr, "https://b.test/"); err == nil {
-			t.Fatalf("expected b.test to be blocked by whitelist")
+	t.Run("shared-host-locations", func(t *testing.T) {
+		a := httpsGet(t, publicAddr, "https://app.dc.example.com/location/x")
+		b := httpsGet(t, publicAddr, "https://app.dc.example.com/teamb/y")
+		if !strings.Contains(a, "label=loc") {
+			t.Fatalf("/location/ should be client A's, got %q", a)
 		}
-		// Open it up to loopback at runtime.
-		must(t, ccB.UpdateWhitelist("b.test", []string{"127.0.0.1/32"}))
+		if !strings.Contains(b, "label=Bsub") || !strings.Contains(b, "path=/y") {
+			t.Fatalf("/teamb/ should be client B's (stripped), got %q", b)
+		}
+	})
+
+	t.Run("tcp-tls-and-whitelist", func(t *testing.T) {
+		// tcp://ssh.dc.example.com starts whitelisted to 203.0.113.0/24 -> blocked.
+		if _, err := tlsEcho(publicAddr, "ssh.dc.example.com", "hi"); err == nil {
+			t.Fatal("expected tcp service to be blocked by whitelist")
+		}
+		// Open it to loopback at runtime, then it must terminate TLS and echo.
+		must(t, ccA.UpdateWhitelist("tcp://ssh.dc.example.com", []string{"127.0.0.1/32"}))
 		time.Sleep(150 * time.Millisecond)
-		body := httpsGet(t, publicAddr, "https://b.test/")
-		if !strings.Contains(body, "ORIGIN-OK") {
-			t.Fatalf("after whitelist add, body = %q", body)
-		}
-	})
-
-	t.Run("multi-client-isolation", func(t *testing.T) {
-		// app.test (client A) and b.test (client B) both serve concurrently.
-		a := httpsGet(t, publicAddr, "https://app.test/")
-		b := httpsGet(t, publicAddr, "https://b.test/")
-		if !strings.Contains(a, "ORIGIN-OK") || !strings.Contains(b, "ORIGIN-OK") {
-			t.Fatalf("multi-client serve failed: a=%q b=%q", a, b)
-		}
-	})
-
-	t.Run("shared-domain-locations", func(t *testing.T) {
-		// One domain, two owners: A serves "/", B serves the "/b/" location.
-		root := httpsGet(t, publicAddr, "https://shared.test/index")
-		if !strings.Contains(root, "label=Aroot") || !strings.Contains(root, "path=/index") {
-			t.Fatalf("shared root (A) = %q", root)
-		}
-		sub := httpsGet(t, publicAddr, "https://shared.test/b/page")
-		if !strings.Contains(sub, "label=Bsub") {
-			t.Fatalf("shared sub-location should be served by B, got %q", sub)
-		}
-		if !strings.Contains(sub, "path=/page") { // strip_prefix removed /b
-			t.Fatalf("expected /b stripped to /page, got %q", sub)
+		got, err := tlsEcho(publicAddr, "ssh.dc.example.com", "hello-ssh")
+		must(t, err)
+		if got != "hello-ssh" {
+			t.Fatalf("tcp echo = %q, want %q", got, "hello-ssh")
 		}
 	})
 }
 
 // --- client wiring ---
 
-func startClient(t *testing.T, socksAddr, publicAddr, uuid, pubKey, shortID, ctrlAddr string, services []control.ServiceReg, logger *log.Logger) *control.Client {
+func startClient(t *testing.T, socksAddr, publicAddr, uuid, pubKey, shortID, ctrlAddr string, certs []control.CertReg, services []control.ServiceReg, logger *log.Logger) *control.Client {
 	t.Helper()
-	host, portStr, _ := net.SplitHostPort(publicAddr)
-	var port uint16
-	fmt.Sscan(portStr, &port)
+	host, _, _ := net.SplitHostPort(publicAddr)
 	cliJSON, err := singbox.ClientConfigJSON(singbox.ClientParams{
 		SocksListen: socksAddr,
 		ServerAddr:  host,
-		ServerPort:  port,
+		ServerPort:  portOf(publicAddr),
 		UUID:        uuid,
 		SNI:         mimic,
 		PublicKey:   pubKey,
@@ -241,20 +204,27 @@ func startClient(t *testing.T, socksAddr, publicAddr, uuid, pubKey, shortID, ctr
 	dial := func(ctx context.Context) (net.Conn, error) {
 		return ctxDialer.DialContext(ctx, "tcp", ctrlAddr)
 	}
-	cc := control.NewClient(uuid, services, dial, logger)
+	cc := control.NewClient(uuid, certs, services, dial, logger)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go cc.Run(ctx)
 	return cc
 }
 
-// --- test helpers ---
+// --- helpers ---
 
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func portOf(addr string) uint16 {
+	_, p, _ := net.SplitHostPort(addr)
+	var n uint16
+	fmt.Sscan(p, &n)
+	return n
 }
 
 func freePort(t *testing.T) int {
@@ -269,8 +239,7 @@ func waitDial(t *testing.T, addr string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-		if err == nil {
+		if c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
 			c.Close()
 			return
 		}
@@ -279,38 +248,22 @@ func waitDial(t *testing.T, addr string) {
 	t.Fatalf("nothing listening on %s", addr)
 }
 
-func waitRegistered(t *testing.T, reg *control.Registry, domains ...string) {
+func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		all := true
-		for _, d := range domains {
-			if !reg.Has(d) {
-				all = false
-				break
-			}
-		}
-		if all {
+		if cond() {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("domains not registered in time: %v", domains)
+	t.Fatal("condition not met in time")
 }
 
-func waitRoutes(t *testing.T, reg *control.Registry, domain string, n int) {
-	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if d, ok := reg.Lookup(domain); ok && len(d.Routes()) >= n {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("domain %s did not reach %d routes in time", domain, n)
+func tcpExists(reg *control.Registry, host string) bool {
+	_, ok := reg.TCPService(host)
+	return ok
 }
-
-func startOriginHTTP(t *testing.T) string { return startOrigin(t, "") }
 
 func startOrigin(t *testing.T, label string) string {
 	t.Helper()
@@ -342,8 +295,6 @@ func startEchoTCP(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// httpsTransport dials the public L4 router regardless of the request host, and
-// skips cert verification (self-signed test certs). SNI follows the request host.
 func httpsTransport(publicAddr string) *http.Transport {
 	return &http.Transport{
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
@@ -354,25 +305,14 @@ func httpsTransport(publicAddr string) *http.Transport {
 	}
 }
 
-func tryHTTPS(publicAddr, url string) (string, error) {
-	client := &http.Client{Transport: httpsTransport(publicAddr), Timeout: 15 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("status %d", resp.StatusCode)
-	}
-	b, _ := io.ReadAll(resp.Body)
-	return string(b), nil
-}
-
 func httpsGet(t *testing.T, publicAddr, url string) string {
 	t.Helper()
-	body, err := tryHTTPS(publicAddr, url)
+	client := &http.Client{Transport: httpsTransport(publicAddr), Timeout: 15 * time.Second}
+	resp, err := client.Get(url)
 	must(t, err)
-	return body
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return string(b)
 }
 
 func socksGet(t *testing.T, socksAddr, url string) string {
@@ -404,18 +344,41 @@ func echoOverWS(t *testing.T, publicAddr, url, msg string) {
 	}
 }
 
-func genCert(t *testing.T, domain string) (certPEM, keyPEM string) {
+// tlsEcho dials the public router with the given SNI, completes the TLS
+// handshake (TLS+TCP service), writes msg, and reads the echo back.
+func tlsEcho(publicAddr, sni, msg string) (string, error) {
+	raw, err := net.DialTimeout("tcp", publicAddr, 10*time.Second)
+	if err != nil {
+		return "", err
+	}
+	defer raw.Close()
+	c := tls.Client(raw, &tls.Config{ServerName: sni, InsecureSkipVerify: true})
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	if err := c.Handshake(); err != nil {
+		return "", err
+	}
+	if _, err := c.Write([]byte(msg)); err != nil {
+		return "", err
+	}
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(bufio.NewReader(c), buf); err != nil {
+		return "", err
+	}
+	return string(buf), nil
+}
+
+func genCert(t *testing.T, names ...string) (certPEM, keyPEM string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	must(t, err)
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(time.Now().UnixNano()),
-		Subject:      pkix.Name{CommonName: domain},
+		Subject:      pkix.Name{CommonName: names[0]},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{domain},
+		DNSNames:     names,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	must(t, err)

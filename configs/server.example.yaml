@@ -35,3 +35,10 @@ clients:
     uuid: "REPLACE_ME"
   # - name: "client-2"
   #   uuid: "..."
+
+# OPTIONAL: certificates the server provides for published hosts, so clients
+# don't have to ship their own (avoids client-side cert dependencies). Covered
+# names are read from the cert SAN, so one wildcard cert works for many hosts.
+# certs:
+#   - cert_path: "/etc/tbox/dc.example.com.crt"   # SAN: dc.example.com, *.dc.example.com
+#     key_path:  "/etc/tbox/dc.example.com.key"

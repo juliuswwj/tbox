@@ -1,7 +1,8 @@
-// Package publish terminates TLS for a registered domain and serves it as a mix
-// of HTTP reverse-proxy locations (with URL/header rewriting) and WebSocket
-// bridges, each forwarding over a reverse stream to the location's owning tbox
-// client. A single domain may aggregate locations from multiple clients.
+// Package publish serves the HTTP/WS side of a published host: it matches a
+// request path to one of the host's services (possibly owned by different
+// clients) and forwards it over a reverse stream — HTTP reverse proxy (with
+// URL/header rewriting) or WebSocket-to-raw-TCP bridge. (Whole-host tcp
+// services are handled directly by the L4 router, not here.)
 package publish
 
 import (
@@ -16,24 +17,24 @@ type Logger interface {
 	Printf(format string, v ...any)
 }
 
-// Handler serves a single registered domain across all its locations.
+// Handler serves the http/ws services registered for one host.
 type Handler struct {
 	routes []*routeHandler
 	logger Logger
 }
 
 type routeHandler struct {
-	entry *control.RouteEntry
-	proxy *httputil.ReverseProxy // nil for ws routes
+	svc   *control.Service
+	proxy *httputil.ReverseProxy // nil for ws services
 }
 
-// NewHandler builds the HTTP handler for a domain snapshot.
-func NewHandler(domain *control.Domain, logger Logger) *Handler {
+// NewHandler builds the HTTP handler for a host's services.
+func NewHandler(services []*control.Service, logger Logger) *Handler {
 	h := &Handler{logger: logger}
-	for _, e := range domain.Routes() {
-		rh := &routeHandler{entry: e}
-		if e.Mode == "http" {
-			rh.proxy = newReverseProxy(e, logger)
+	for _, s := range services {
+		rh := &routeHandler{svc: s}
+		if s.Mode == "http" {
+			rh.proxy = newReverseProxy(s, logger)
 		}
 		h.routes = append(h.routes, rh)
 	}
@@ -46,14 +47,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// Per-location source-IP whitelist (precise). Use the real connection
+	// Per-service source-IP whitelist (precise). Use the real connection
 	// remote, never X-Forwarded-For.
-	if !rh.entry.Allow.AllowedString(r.RemoteAddr) {
+	if !rh.svc.Allow.AllowedString(r.RemoteAddr) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	if rh.entry.Mode == "ws" {
-		h.serveWS(w, r, rh.entry)
+	if rh.svc.Mode == "ws" {
+		h.serveWS(w, r, rh.svc)
 		return
 	}
 	rh.proxy.ServeHTTP(w, r)
@@ -63,9 +64,9 @@ func (h *Handler) match(path string) *routeHandler {
 	var best *routeHandler
 	bestLen := -1
 	for _, rh := range h.routes {
-		if pathHasPrefix(path, rh.entry.Path) && len(rh.entry.Path) > bestLen {
+		if pathHasPrefix(path, rh.svc.Path) && len(rh.svc.Path) > bestLen {
 			best = rh
-			bestLen = len(rh.entry.Path)
+			bestLen = len(rh.svc.Path)
 		}
 	}
 	return best
