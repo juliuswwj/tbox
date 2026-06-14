@@ -124,18 +124,19 @@ publish:
 
 ### Option C — client reads /etc/letsencrypt directly (no copy)
 
-Point `client.yaml` straight at certbot's files. Grant the `tbox` user an ACL on
-**both** LE dirs (`live/` symlinks into `archive/`, so both need `r-x`), and add
-a restart hook (the systemd sandbox does NOT block this — `ProtectSystem=strict`
-keeps the paths readable; the only barrier is the `0700` perms, which the ACL
-fixes — no `ReadOnlyPaths=` drop-in is needed):
+Point `client.yaml` straight at certbot's files. The `tbox` user needs an ACL on
+**both** LE dirs (`live/` symlinks into `archive/`, so both need `r-x`). The
+catch: on renewal certbot writes **new** files into `archive/`, which do *not*
+inherit the ACL — so the ACL must be re-applied (and the client restarted) on
+every renewal. Use the shipped deploy hook for that; it runs as root exactly
+when the cert changes:
 
 ```sh
-sudo setfacl -Rm u:tbox:rX /etc/letsencrypt/live /etc/letsencrypt/archive
+sudo install -m 0755 deploy/letsencrypt-acl-hook.sh \
+     /etc/letsencrypt/renewal-hooks/deploy/tbox-acl.sh
 
-printf '#!/bin/sh\nsystemctl restart tbox-client\n' \
-  | sudo tee /etc/letsencrypt/renewal-hooks/deploy/tbox-restart.sh
-sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/tbox-restart.sh
+# apply now for the already-issued cert (sets the ACL + restarts the client):
+sudo /etc/letsencrypt/renewal-hooks/deploy/tbox-acl.sh
 ```
 
 ```yaml
@@ -148,9 +149,20 @@ publish:
     upstream: "127.0.0.1:8080"
 ```
 
-> certbot can reset perms on renewal (re-running the ACL), so Option B is a bit
-> sturdier than C. Running `tbox-client` as root (drop `User=tbox` from the unit)
-> also works and needs no ACL.
+The hook (`deploy/letsencrypt-acl-hook.sh`) just runs, as root on each renewal:
+
+```sh
+setfacl -Rm u:tbox:rX /etc/letsencrypt/live /etc/letsencrypt/archive
+systemctl try-restart tbox-client
+```
+
+(The systemd sandbox does NOT block reads here — `ProtectSystem=strict` keeps the
+paths readable; the only barrier is the `0700` perms, which the ACL fixes, so no
+`ReadOnlyPaths=` drop-in is needed.)
+
+> Running `tbox-client` as root (drop `User=tbox` from the unit) also works and
+> needs no ACL — but the deploy hook's `systemctl restart` is still required so a
+> renewed cert is actually re-read.
 
 ## Troubleshooting
 
