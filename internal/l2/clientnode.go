@@ -2,22 +2,32 @@ package l2
 
 import (
 	"bufio"
+	"fmt"
 	"log"
 	"net"
 	"sync"
 )
 
+// Route is an extra route to install on the TAP/bridge device. Gw == "" means a
+// link-scoped route via the device; otherwise the route is via Gw.
+type Route struct {
+	Dst string // CIDR
+	Gw  string // optional gateway
+}
+
 // ClientTAP describes an optional native TAP attachment on the client, making
 // the client itself a node on the tunnel's L2 segment.
 type ClientTAP struct {
-	Name         string
-	Bridge       string // if set, enslave the TAP to this bridge and put the IP on it
-	IPv4CIDR     string // CIDR; "" leaves the interface address-less
-	IPv6         string // CIDR; optional
-	DefaultRoute bool
-	Gateway      string
-	SubnetRoute  string
-	ServerRealIP string // pinned to the current default route when DefaultRoute is set
+	Name          string
+	Bridge        string   // if set, enslave the TAP to this bridge and put the IP on it
+	BridgeMembers []string // extra local NICs to also enslave to the bridge
+	IPv4CIDR      string   // CIDR; "" leaves the interface address-less
+	IPv6          string   // CIDR; optional
+	Routes        []Route  // extra routes installed on the TAP/bridge device
+	DefaultRoute  bool
+	Gateway       string
+	SubnetRoute   string
+	ServerRealIP  string // pinned to the current default route when DefaultRoute is set
 }
 
 // ClientOptions configures a client-side L2 node.
@@ -35,7 +45,8 @@ type ClientNode struct {
 	stream        net.Conn
 	dev           *Device
 	udp           *UDPEndpoint
-	createdBridge string // bridge tbox created and must remove on close ("" = none)
+	createdBridge string   // bridge tbox created and must remove on close ("" = none)
+	bridgeMembers []string // local NICs tbox enslaved, to detach on close
 	logger        *log.Logger
 
 	closeOnce sync.Once
@@ -121,6 +132,13 @@ func (n *ClientNode) startTAP(t *ClientTAP, mtu int) error {
 		if err := SetUp(t.Bridge, mtu); err != nil {
 			return err
 		}
+		// Enslave any extra local NICs so their segment is bridged in too.
+		for _, m := range t.BridgeMembers {
+			if err := AddToBridge(m, t.Bridge); err != nil {
+				return fmt.Errorf("enslave %q to %q: %w", m, t.Bridge, err)
+			}
+			n.bridgeMembers = append(n.bridgeMembers, m)
+		}
 		ipDev = t.Bridge
 	}
 
@@ -146,6 +164,16 @@ func (n *ClientNode) startTAP(t *ClientTAP, mtu int) error {
 			}
 		}
 		if err := AddDefaultRoute(ipDev, t.Gateway); err != nil {
+			return err
+		}
+	}
+	// Custom user-specified routes (link-scoped or via a gateway).
+	for _, rt := range t.Routes {
+		if rt.Gw != "" {
+			if err := AddRouteVia(ipDev, rt.Dst, rt.Gw); err != nil {
+				return err
+			}
+		} else if err := AddRoute(ipDev, rt.Dst); err != nil {
 			return err
 		}
 	}
@@ -181,6 +209,9 @@ func (n *ClientNode) Close() error {
 		}
 		if n.dev != nil {
 			_ = n.dev.Close() // removes the TAP, auto-detaching it from any bridge
+		}
+		for _, m := range n.bridgeMembers {
+			_ = RemoveFromBridge(m) // return enslaved NICs to standalone
 		}
 		if n.createdBridge != "" {
 			_ = DelLink(n.createdBridge) // remove the bridge tbox created

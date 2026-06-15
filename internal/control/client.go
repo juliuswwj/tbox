@@ -23,10 +23,12 @@ import (
 type ClientTunParams struct {
 	TAPEnable          bool
 	TAPName            string
-	TAPBridge          string // "" = no bridge; else enslave TAP to this (auto-created) bridge
-	TAPv4              string // manual CIDR override; "" uses the server assignment
+	TAPBridge          string   // "" = no bridge; else enslave TAP to this (auto-created) bridge
+	TAPBridgeMembers   []string // extra local NICs to enslave to the bridge
+	TAPv4              string   // manual CIDR override; "" uses the server assignment
 	TAPv6              string
-	UDPListen          string // "" disables the udpt UDP endpoint
+	TAPRoutes          []l2.Route // extra routes on the TAP/bridge device
+	UDPListen          string     // "" disables the udpt UDP endpoint
 	AcceptDefaultRoute bool
 	MTU                int
 }
@@ -315,7 +317,13 @@ func (c *Client) startTun(sess *yamux.Session, asg *TunAssignment) (*l2.ClientNo
 
 	opts := l2.ClientOptions{MTU: c.tun.MTU, UDPListen: c.tun.UDPListen}
 	if c.tun.TAPEnable {
-		tap := &l2.ClientTAP{Name: c.tun.TAPName, Bridge: c.tun.TAPBridge, IPv6: c.tun.TAPv6}
+		tap := &l2.ClientTAP{
+			Name:          c.tun.TAPName,
+			Bridge:        c.tun.TAPBridge,
+			BridgeMembers: c.tun.TAPBridgeMembers,
+			IPv6:          c.tun.TAPv6,
+			Routes:        c.tun.TAPRoutes,
+		}
 		switch {
 		case c.tun.TAPv4 != "":
 			tap.IPv4CIDR = c.tun.TAPv4

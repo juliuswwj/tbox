@@ -14,6 +14,7 @@ import (
 
 	"github.com/juliuswwj/tbox/internal/config"
 	"github.com/juliuswwj/tbox/internal/control"
+	"github.com/juliuswwj/tbox/internal/l2"
 	"github.com/juliuswwj/tbox/internal/singbox"
 	"github.com/juliuswwj/tbox/internal/token"
 )
@@ -148,8 +149,13 @@ func buildTunParams(t config.ClientTun) *control.ClientTunParams {
 		p.TAPEnable = true
 		p.TAPName = t.TAP.Name
 		p.TAPBridge = t.TAP.Bridge
+		p.TAPBridgeMembers = t.TAP.BridgeMembers
 		p.TAPv4 = t.TAP.IPv4CIDR
 		p.TAPv6 = t.TAP.IPv6
+		for _, r := range t.TAP.Routes {
+			dst, gw, _ := config.ParseTunRoute(r) // already validated at load
+			p.TAPRoutes = append(p.TAPRoutes, l2.Route{Dst: dst, Gw: gw})
+		}
 	}
 	if t.UDP != nil {
 		p.UDPListen = t.UDP.Listen

@@ -181,12 +181,6 @@ func setupTunHub(cfg *config.ServerConfig, logger *log.Logger) (*control.TunHub,
 		_ = dev.Close()
 		return nil, noop, fmt.Errorf("gateway addr: %w", err)
 	}
-	if cfg.Tun.Bridge != "" {
-		if err := l2.AddToBridge(name, cfg.Tun.Bridge); err != nil {
-			_ = dev.Close()
-			return nil, noop, fmt.Errorf("bridge: %w", err)
-		}
-	}
 
 	var onIPv6 func(net.IP)
 	if cfg.Tun.EnablePassthrough {

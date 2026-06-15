@@ -67,7 +67,8 @@ func DelLink(name string) error {
 	return netlink.LinkDel(link)
 }
 
-// AddToBridge enslaves the interface to an existing Linux bridge.
+// AddToBridge brings the interface up and enslaves it to an existing Linux
+// bridge.
 func AddToBridge(name, bridge string) error {
 	link, err := netlink.LinkByName(name)
 	if err != nil {
@@ -77,7 +78,20 @@ func AddToBridge(name, bridge string) error {
 	if err != nil {
 		return fmt.Errorf("bridge %q: %w", bridge, err)
 	}
+	if err := netlink.LinkSetUp(link); err != nil {
+		return fmt.Errorf("link up %q: %w", name, err)
+	}
 	return netlink.LinkSetMaster(link, br)
+}
+
+// RemoveFromBridge detaches an interface from its bridge master. Missing is not
+// an error.
+func RemoveFromBridge(name string) error {
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return nil
+	}
+	return netlink.LinkSetNoMaster(link)
 }
 
 // AddRoute installs a link-scoped route for dstCIDR via the interface.
@@ -93,6 +107,27 @@ func AddRoute(name, dstCIDR string) error {
 	r := &netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst, Scope: netlink.SCOPE_LINK}
 	if err := netlink.RouteReplace(r); err != nil {
 		return fmt.Errorf("add route %s via %q: %w", dstCIDR, name, err)
+	}
+	return nil
+}
+
+// AddRouteVia installs a route for dstCIDR via the gateway gw on the interface.
+func AddRouteVia(name, dstCIDR, gw string) error {
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return fmt.Errorf("link %q: %w", name, err)
+	}
+	_, dst, err := net.ParseCIDR(dstCIDR)
+	if err != nil {
+		return fmt.Errorf("parse cidr %q: %w", dstCIDR, err)
+	}
+	g := net.ParseIP(gw)
+	if g == nil {
+		return fmt.Errorf("bad gateway %q", gw)
+	}
+	r := &netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst, Gw: g}
+	if err := netlink.RouteReplace(r); err != nil {
+		return fmt.Errorf("add route %s via %s: %w", dstCIDR, gw, err)
 	}
 	return nil
 }

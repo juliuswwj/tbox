@@ -27,7 +27,9 @@ func AddAddr(string, string) error               { return errUnsupported }
 func EnsureBridge(string) (bool, error)          { return false, errUnsupported }
 func DelLink(string) error                       { return errUnsupported }
 func AddToBridge(string, string) error           { return errUnsupported }
+func RemoveFromBridge(string) error              { return errUnsupported }
 func AddRoute(string, string) error              { return errUnsupported }
+func AddRouteVia(string, string, string) error   { return errUnsupported }
 func AddDefaultRoute(string, string) error       { return errUnsupported }
 func AddHostRouteViaCurrentGateway(string) error { return errUnsupported }
 

@@ -11,12 +11,34 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/juliuswwj/tbox/internal/destallow"
 )
+
+// ParseTunRoute parses a tun route spec: "CIDR" (link-scoped via the device) or
+// "CIDR via GATEWAY". It returns the destination CIDR and an optional gateway.
+func ParseTunRoute(s string) (dst, gw string, err error) {
+	f := strings.Fields(s)
+	switch {
+	case len(f) == 1:
+		dst = f[0]
+	case len(f) == 3 && f[1] == "via":
+		dst, gw = f[0], f[2]
+	default:
+		return "", "", fmt.Errorf("route %q: want \"CIDR\" or \"CIDR via GATEWAY\"", s)
+	}
+	if _, _, err := net.ParseCIDR(dst); err != nil {
+		return "", "", fmt.Errorf("route %q: %w", s, err)
+	}
+	if gw != "" && net.ParseIP(gw) == nil {
+		return "", "", fmt.Errorf("route %q: bad gateway %q", s, gw)
+	}
+	return dst, gw, nil
+}
 
 // CertFile points at a TLS certificate + key on disk. The covered domain names
 // are read from the certificate's SAN (so wildcards just work); they are not
@@ -87,16 +109,19 @@ type ServerTun struct {
 	MTU               int    `yaml:"mtu"`                // default 1448
 	EnableNAT         bool   `yaml:"enable_nat"`         // MASQUERADE pool_v4 out wan_interface
 	WANInterface      string `yaml:"wan_interface"`      // required when enable_nat
-	Bridge            string `yaml:"bridge"`             // optional: enslave TAP to a bridge
 	EnablePassthrough bool   `yaml:"enable_passthrough"` // IPv6 /80 routes + ndppd
 }
 
 // ClientTunTAP optionally makes the client itself a node on the L2 segment.
 type ClientTunTAP struct {
-	Name     string `yaml:"name"`      // default tbox0
-	Bridge   string `yaml:"bridge"`    // optional: enslave TAP to this bridge (auto-created), put IP on it
-	IPv4CIDR string `yaml:"ipv4_cidr"` // optional manual address (else server-assigned)
-	IPv6     string `yaml:"ipv6"`      // optional manual address
+	Name          string   `yaml:"name"`           // default tbox0
+	Bridge        string   `yaml:"bridge"`         // optional: enslave TAP to this bridge (auto-created), put IP on it
+	BridgeMembers []string `yaml:"bridge_members"` // optional: extra local NICs to enslave to the bridge
+	IPv4CIDR      string   `yaml:"ipv4_cidr"`      // optional manual address (else server-assigned)
+	IPv6          string   `yaml:"ipv6"`           // optional manual address
+	// Routes are extra routes installed on the TAP/bridge device. Each is a CIDR,
+	// optionally "CIDR via GATEWAY" (e.g. "192.168.9.0/24 via 10.42.0.1").
+	Routes []string `yaml:"routes"`
 }
 
 // ClientTunUDP optionally exposes a local UDP socket so external udpt.py
@@ -360,6 +385,14 @@ func LoadClient(path string) (*ClientConfig, error) {
 			if c.Tun.TAP.IPv4CIDR != "" {
 				if _, _, err := net.ParseCIDR(c.Tun.TAP.IPv4CIDR); err != nil {
 					return nil, fmt.Errorf("tun.tap.ipv4_cidr %q: %w", c.Tun.TAP.IPv4CIDR, err)
+				}
+			}
+			if len(c.Tun.TAP.BridgeMembers) > 0 && c.Tun.TAP.Bridge == "" {
+				return nil, fmt.Errorf("tun.tap.bridge_members requires tun.tap.bridge")
+			}
+			for _, r := range c.Tun.TAP.Routes {
+				if _, _, err := ParseTunRoute(r); err != nil {
+					return nil, fmt.Errorf("tun.tap.routes: %w", err)
 				}
 			}
 		}

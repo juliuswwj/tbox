@@ -185,8 +185,12 @@ UDP port is exposed to the internet, so the "looks like HTTPS" property holds).
 - **Bridging a local segment** (client): set `tap.bridge: br0` to enslave the
   TAP to a Linux bridge (tbox creates it if missing) and put the address on the
   bridge instead of the TAP — bridging a local LAN or container network into the
-  tunnel. Omit `ipv4_cidr` for a pure L2 bridge with no address on `br0`. The
-  bridge tbox auto-created is removed on exit.
+  tunnel. Add `tap.bridge_members: [eth1]` to also enslave local NICs to the
+  bridge. Omit `ipv4_cidr` for a pure L2 bridge with no address on `br0`.
+  Anything tbox created (the bridge, enslaved members) is reverted on exit.
+- **Custom routes** (client): `tap.routes` installs extra routes on the
+  TAP/bridge device, each `"CIDR"` (link-scoped) or `"CIDR via GATEWAY"` — e.g.
+  `"10.9.0.0/16 via 10.42.0.1"`.
 
 The server, and any client using a native TAP or `accept_default_route`, needs
 `CAP_NET_ADMIN`. IPv6 passthrough additionally requires `ndppd` installed and

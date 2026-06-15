@@ -118,6 +118,21 @@ func TestClientTunValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("bridge with members and routes", func(t *testing.T) {
+		if _, err := LoadClient(writeTemp(t, base+`tun:
+  enable: true
+  tap:
+    bridge: "br0"
+    bridge_members: ["eth1"]
+    ipv4_cidr: "10.42.0.9/24"
+    routes:
+      - "192.168.9.0/24"
+      - "10.9.0.0/16 via 10.42.0.1"
+`)); err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	bad := map[string]string{
 		"enable without endpoint": `tun:
   enable: true
@@ -131,6 +146,24 @@ func TestClientTunValidation(t *testing.T) {
   tap:
     ipv4_cidr: "999.0.0.0/8"
 `,
+		"bridge_members without bridge": `tun:
+  enable: true
+  tap:
+    ipv4_cidr: "10.42.0.9/24"
+    bridge_members: ["eth1"]
+`,
+		"invalid route": `tun:
+  enable: true
+  tap:
+    ipv4_cidr: "10.42.0.9/24"
+    routes: ["not-a-cidr"]
+`,
+		"invalid route gateway": `tun:
+  enable: true
+  tap:
+    ipv4_cidr: "10.42.0.9/24"
+    routes: ["10.0.0.0/8 via nope"]
+`,
 	}
 	for name, tun := range bad {
 		t.Run(name, func(t *testing.T) {
@@ -138,5 +171,31 @@ func TestClientTunValidation(t *testing.T) {
 				t.Fatalf("%s: expected error", name)
 			}
 		})
+	}
+}
+
+func TestParseTunRoute(t *testing.T) {
+	cases := []struct {
+		in      string
+		dst, gw string
+		wantErr bool
+	}{
+		{in: "192.168.9.0/24", dst: "192.168.9.0/24"},
+		{in: "10.9.0.0/16 via 10.42.0.1", dst: "10.9.0.0/16", gw: "10.42.0.1"},
+		{in: "10.0.0.0/8 gw 1.2.3.4", wantErr: true},
+		{in: "bad", wantErr: true},
+		{in: "10.0.0.0/8 via bad", wantErr: true},
+	}
+	for _, c := range cases {
+		dst, gw, err := ParseTunRoute(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("ParseTunRoute(%q): expected error", c.in)
+			}
+			continue
+		}
+		if err != nil || dst != c.dst || gw != c.gw {
+			t.Errorf("ParseTunRoute(%q) = (%q,%q,%v), want (%q,%q,nil)", c.in, dst, gw, err, c.dst, c.gw)
+		}
 	}
 }

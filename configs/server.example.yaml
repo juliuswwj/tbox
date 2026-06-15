@@ -54,7 +54,6 @@ clients:
 #   mtu: 1448
 #   enable_nat: true               # MASQUERADE pool_v4 for global egress
 #   wan_interface: "eth0"          # required when enable_nat
-#   # bridge: "br0"                # optional: enslave the TAP to a bridge
 #   enable_passthrough: true       # IPv6: add /80 routes + restart ndppd
 #   # ipv6_prefix: "2001:db8:0:42::/80"
 
