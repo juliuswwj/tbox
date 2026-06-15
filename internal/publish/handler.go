@@ -6,6 +6,8 @@
 package publish
 
 import (
+	"bufio"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -130,6 +132,17 @@ func (s *statusRecorder) Flush() {
 	if f, ok := s.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Hijack passes through to the underlying ResponseWriter so the reverse proxy
+// can take over the connection for a WebSocket (or other) upgrade. Without
+// this, wrapping the writer for ban accounting would break upgrades with a 502.
+func (s *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := s.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("underlying ResponseWriter is not a http.Hijacker")
+	}
+	return hj.Hijack()
 }
 
 func (h *Handler) match(path string) *routeHandler {

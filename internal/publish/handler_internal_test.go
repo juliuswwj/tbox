@@ -1,10 +1,45 @@
 package publish
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
+
+// hijackableRW is a ResponseWriter that also implements http.Hijacker.
+type hijackableRW struct {
+	http.ResponseWriter
+	hijacked bool
+}
+
+func (h *hijackableRW) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h.hijacked = true
+	return nil, nil, nil
+}
+
+func TestStatusRecorderHijackPassthrough(t *testing.T) {
+	// When the underlying writer supports hijacking (as the real HTTP server's
+	// does), the recorder must pass it through so WebSocket upgrades work.
+	under := &hijackableRW{ResponseWriter: httptest.NewRecorder()}
+	sr := &statusRecorder{ResponseWriter: under, status: http.StatusOK}
+	if _, ok := interface{}(sr).(http.Hijacker); !ok {
+		t.Fatal("statusRecorder must implement http.Hijacker")
+	}
+	if _, _, err := sr.Hijack(); err != nil {
+		t.Fatalf("Hijack passthrough failed: %v", err)
+	}
+	if !under.hijacked {
+		t.Fatal("Hijack did not reach the underlying writer")
+	}
+
+	// When the underlying writer can't hijack, it returns an error (not a panic).
+	srPlain := &statusRecorder{ResponseWriter: httptest.NewRecorder(), status: http.StatusOK}
+	if _, _, err := srPlain.Hijack(); err == nil {
+		t.Fatal("expected an error hijacking a non-Hijacker writer")
+	}
+}
 
 func TestRemoteIP(t *testing.T) {
 	cases := []struct {
