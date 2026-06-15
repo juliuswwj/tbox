@@ -185,13 +185,30 @@ func (r *Router) serveHTTP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "TLS required", http.StatusBadRequest)
 		return
 	}
-	host := strings.ToLower(req.TLS.ServerName)
+	host := dispatchHost(req)
 	services := r.reg.HTTPServices(host)
 	if len(services) == 0 {
 		http.NotFound(w, req)
 		return
 	}
 	r.handlerFor(host, services).ServeHTTP(w, req)
+}
+
+// dispatchHost picks the virtual host for a request from its Host header (the
+// HTTP/2 :authority or HTTP/1.1 Host), not the TLS SNI. Browsers coalesce
+// HTTP/2 connections across hostnames that share a certificate and IP, so one
+// connection (one SNI) can carry requests for several hosts; the Host header is
+// what names the intended virtual host per request. It falls back to the SNI
+// only when Host is absent (e.g. HTTP/1.0).
+func dispatchHost(req *http.Request) string {
+	host := strings.ToLower(req.Host)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host == "" && req.TLS != nil {
+		host = strings.ToLower(req.TLS.ServerName)
+	}
+	return host
 }
 
 // handlerFor returns a cached publish handler for the host, rebuilding it
