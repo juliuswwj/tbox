@@ -65,6 +65,8 @@ publish:
 #   mtu: 1448
 #   tap:                           # native TAP on this host
 #     name: "tbox0"
+#     # bridge: "br0"              # enslave TAP to br0 (auto-created); IP goes on br0,
+#     #                            #   bridging a local LAN/containers into the tunnel
 #     # ipv4_cidr: "10.42.0.9/24"  # omit to use the server-assigned address
 #     # ipv6: "2001:db8:0:42::9/80"
 #   udp:                           # udpt.py entrypoint: run `udpt.py --target 127.0.0.1:3390 --ip ...`

@@ -94,6 +94,7 @@ type ServerTun struct {
 // ClientTunTAP optionally makes the client itself a node on the L2 segment.
 type ClientTunTAP struct {
 	Name     string `yaml:"name"`      // default tbox0
+	Bridge   string `yaml:"bridge"`    // optional: enslave TAP to this bridge (auto-created), put IP on it
 	IPv4CIDR string `yaml:"ipv4_cidr"` // optional manual address (else server-assigned)
 	IPv6     string `yaml:"ipv6"`      // optional manual address
 }

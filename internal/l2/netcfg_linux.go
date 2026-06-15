@@ -42,6 +42,31 @@ func AddAddr(name, cidr string) error {
 	return nil
 }
 
+// EnsureBridge makes sure a Linux bridge named bridge exists, creating it if
+// missing. It reports whether this call created it (so the caller can remove it
+// on teardown).
+func EnsureBridge(bridge string) (created bool, err error) {
+	if _, err := netlink.LinkByName(bridge); err == nil {
+		return false, nil // already exists
+	}
+	la := netlink.NewLinkAttrs()
+	la.Name = bridge
+	if err := netlink.LinkAdd(&netlink.Bridge{LinkAttrs: la}); err != nil {
+		return false, fmt.Errorf("create bridge %q: %w", bridge, err)
+	}
+	return true, nil
+}
+
+// DelLink removes an interface (e.g. a bridge tbox created). Missing is not an
+// error.
+func DelLink(name string) error {
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return nil
+	}
+	return netlink.LinkDel(link)
+}
+
 // AddToBridge enslaves the interface to an existing Linux bridge.
 func AddToBridge(name, bridge string) error {
 	link, err := netlink.LinkByName(name)

@@ -147,6 +147,7 @@ func buildTunParams(t config.ClientTun) *control.ClientTunParams {
 	if t.TAP != nil {
 		p.TAPEnable = true
 		p.TAPName = t.TAP.Name
+		p.TAPBridge = t.TAP.Bridge
 		p.TAPv4 = t.TAP.IPv4CIDR
 		p.TAPv6 = t.TAP.IPv6
 	}

@@ -23,6 +23,7 @@ import (
 type ClientTunParams struct {
 	TAPEnable          bool
 	TAPName            string
+	TAPBridge          string // "" = no bridge; else enslave TAP to this (auto-created) bridge
 	TAPv4              string // manual CIDR override; "" uses the server assignment
 	TAPv6              string
 	UDPListen          string // "" disables the udpt UDP endpoint
@@ -314,7 +315,7 @@ func (c *Client) startTun(sess *yamux.Session, asg *TunAssignment) (*l2.ClientNo
 
 	opts := l2.ClientOptions{MTU: c.tun.MTU, UDPListen: c.tun.UDPListen}
 	if c.tun.TAPEnable {
-		tap := &l2.ClientTAP{Name: c.tun.TAPName, IPv6: c.tun.TAPv6}
+		tap := &l2.ClientTAP{Name: c.tun.TAPName, Bridge: c.tun.TAPBridge, IPv6: c.tun.TAPv6}
 		switch {
 		case c.tun.TAPv4 != "":
 			tap.IPv4CIDR = c.tun.TAPv4
@@ -330,8 +331,10 @@ func (c *Client) startTun(sess *yamux.Session, asg *TunAssignment) (*l2.ClientNo
 				opts.MTU = asg.MTU
 			}
 		}
-		if tap.IPv4CIDR == "" {
-			c.logger.Printf("control: tun TAP enabled but no IPv4 (no manual addr, no server assignment); skipping native TAP")
+		// An address-less TAP is fine when bridging (pure L2 bridge of a local
+		// segment); otherwise we need an address to be useful.
+		if tap.IPv4CIDR == "" && tap.Bridge == "" {
+			c.logger.Printf("control: tun TAP enabled but no IPv4 and no bridge; skipping native TAP")
 		} else {
 			opts.TAP = tap
 		}

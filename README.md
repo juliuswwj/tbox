@@ -182,6 +182,12 @@ UDP port is exposed to the internet, so the "looks like HTTPS" property holds).
   tunnel. Virtual IPs are either server-assigned (native TAP) or self-configured
   (`udpt.py --ip`).
 
+- **Bridging a local segment** (client): set `tap.bridge: br0` to enslave the
+  TAP to a Linux bridge (tbox creates it if missing) and put the address on the
+  bridge instead of the TAP — bridging a local LAN or container network into the
+  tunnel. Omit `ipv4_cidr` for a pure L2 bridge with no address on `br0`. The
+  bridge tbox auto-created is removed on exit.
+
 The server, and any client using a native TAP or `accept_default_route`, needs
 `CAP_NET_ADMIN`. IPv6 passthrough additionally requires `ndppd` installed and
 configured by the operator for the pool prefix; tbox adds the per-host `/80`

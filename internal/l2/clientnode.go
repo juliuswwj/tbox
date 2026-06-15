@@ -11,6 +11,7 @@ import (
 // the client itself a node on the tunnel's L2 segment.
 type ClientTAP struct {
 	Name         string
+	Bridge       string // if set, enslave the TAP to this bridge and put the IP on it
 	IPv4CIDR     string // CIDR; "" leaves the interface address-less
 	IPv6         string // CIDR; optional
 	DefaultRoute bool
@@ -30,11 +31,12 @@ type ClientOptions struct {
 // endpoints: an optional native TAP and an optional UDP endpoint fronting
 // unmodified udpt.py clients. All share one client-side Switch.
 type ClientNode struct {
-	sw     *Switch
-	stream net.Conn
-	dev    *Device
-	udp    *UDPEndpoint
-	logger *log.Logger
+	sw            *Switch
+	stream        net.Conn
+	dev           *Device
+	udp           *UDPEndpoint
+	createdBridge string // bridge tbox created and must remove on close ("" = none)
+	logger        *log.Logger
 
 	closeOnce sync.Once
 }
@@ -101,18 +103,39 @@ func (n *ClientNode) startTAP(t *ClientTAP, mtu int) error {
 	if err := SetUp(name, mtu); err != nil {
 		return err
 	}
+
+	// When bridging, the TAP becomes a bridge port (no L3 address); the IP and
+	// routes go on the bridge. tbox creates the bridge if it does not exist.
+	ipDev := name
+	if t.Bridge != "" {
+		created, err := EnsureBridge(t.Bridge)
+		if err != nil {
+			return err
+		}
+		if created {
+			n.createdBridge = t.Bridge
+		}
+		if err := AddToBridge(name, t.Bridge); err != nil {
+			return err
+		}
+		if err := SetUp(t.Bridge, mtu); err != nil {
+			return err
+		}
+		ipDev = t.Bridge
+	}
+
 	if t.IPv4CIDR != "" {
-		if err := AddAddr(name, t.IPv4CIDR); err != nil {
+		if err := AddAddr(ipDev, t.IPv4CIDR); err != nil {
 			return err
 		}
 	}
 	if t.IPv6 != "" {
-		if err := AddAddr(name, t.IPv6); err != nil {
+		if err := AddAddr(ipDev, t.IPv6); err != nil {
 			return err
 		}
 	}
 	if t.SubnetRoute != "" {
-		if err := AddRoute(name, t.SubnetRoute); err != nil {
+		if err := AddRoute(ipDev, t.SubnetRoute); err != nil {
 			return err
 		}
 	}
@@ -122,10 +145,11 @@ func (n *ClientNode) startTAP(t *ClientTAP, mtu int) error {
 				n.logger.Printf("l2: pin carrier host route %s: %v", t.ServerRealIP, err)
 			}
 		}
-		if err := AddDefaultRoute(name, t.Gateway); err != nil {
+		if err := AddDefaultRoute(ipDev, t.Gateway); err != nil {
 			return err
 		}
 	}
+
 	port := n.sw.AddPort(func(frame []byte) error {
 		_, werr := dev.Write(frame)
 		return werr
@@ -140,7 +164,11 @@ func (n *ClientNode) startTAP(t *ClientTAP, mtu int) error {
 			n.sw.Inject(port, buf[:m])
 		}
 	}()
-	n.logger.Printf("l2: native TAP %s up (mtu %d)", name, mtu)
+	if t.Bridge != "" {
+		n.logger.Printf("l2: native TAP %s up (mtu %d), bridged to %s", name, mtu, t.Bridge)
+	} else {
+		n.logger.Printf("l2: native TAP %s up (mtu %d)", name, mtu)
+	}
 	return nil
 }
 
@@ -152,7 +180,10 @@ func (n *ClientNode) Close() error {
 			_ = n.udp.Close()
 		}
 		if n.dev != nil {
-			_ = n.dev.Close()
+			_ = n.dev.Close() // removes the TAP, auto-detaching it from any bridge
+		}
+		if n.createdBridge != "" {
+			_ = DelLink(n.createdBridge) // remove the bridge tbox created
 		}
 		_ = n.stream.Close()
 	})

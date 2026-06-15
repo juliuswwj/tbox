@@ -24,6 +24,8 @@ func (d *Device) Close() error              { return nil }
 
 func SetUp(string, int) error                    { return errUnsupported }
 func AddAddr(string, string) error               { return errUnsupported }
+func EnsureBridge(string) (bool, error)          { return false, errUnsupported }
+func DelLink(string) error                       { return errUnsupported }
 func AddToBridge(string, string) error           { return errUnsupported }
 func AddRoute(string, string) error              { return errUnsupported }
 func AddDefaultRoute(string, string) error       { return errUnsupported }
