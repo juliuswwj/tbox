@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/signal"
@@ -24,7 +23,7 @@ import (
 // registers published services and serves reverse streams, and the local admin
 // listener for runtime whitelist changes.
 func RunClient(cfg *config.ClientConfig) error {
-	logger := log.New(os.Stderr, "[tbox-client] ", log.LstdFlags|log.Lmsgprefix)
+	logger := newLogger("[tbox-client] ")
 
 	tok, err := token.Decode(cfg.Token)
 	if err != nil {

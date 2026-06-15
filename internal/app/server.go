@@ -24,7 +24,7 @@ import (
 // RunServer starts the VPS-side server: the embedded sing-box VLESS-REALITY
 // inbound, the control-plane listener, and the public :443 SNI router.
 func RunServer(cfg *config.ServerConfig) error {
-	logger := log.New(os.Stderr, "[tbox-server] ", log.LstdFlags|log.Lmsgprefix)
+	logger := newLogger("[tbox-server] ")
 
 	rHost, rPort, err := splitHostPort(cfg.RealityInboundAddr)
 	if err != nil {
