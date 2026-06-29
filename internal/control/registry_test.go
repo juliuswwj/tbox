@@ -138,7 +138,13 @@ func TestServerOwnedServiceDialsDirectly(t *testing.T) {
 	}
 
 	accepted := make(chan struct{})
-	go func() { c, _ := ln.Accept(); if c != nil { close(accepted); c.Close() } }()
+	go func() {
+		c, _ := ln.Accept()
+		if c != nil {
+			close(accepted)
+			c.Close()
+		}
+	}()
 
 	conn, err := svc.Dial()
 	if err != nil {
