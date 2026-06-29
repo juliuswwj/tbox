@@ -1,10 +1,11 @@
 //go:build with_utls
 
 // Package integration drives a full loopback round trip: a tbox server and two
-// tbox clients connected over a real VLESS-REALITY tunnel (mimicking
-// www.microsoft.com). It exercises the SOCKS5H proxy and all publish modes
-// (HTTP, WebSocket, TLS+TCP) served under a single server-provided wildcard
-// cert, plus a shared host across clients and a dynamic whitelist.
+// tbox clients connected over a real VLESS-REALITY tunnel. The REALITY mimic is
+// a local TLS 1.3 + HTTP/2 server (no external network, so the test is
+// deterministic). It exercises the SOCKS5H proxy and all publish modes (HTTP,
+// WebSocket, TLS+TCP) served under a single server-provided wildcard cert, plus
+// a shared host across clients and a dynamic whitelist.
 package integration
 
 import (
@@ -36,12 +37,7 @@ import (
 	"github.com/juliuswwj/tbox/internal/token"
 )
 
-const mimic = "www.microsoft.com"
-
 func TestEndToEnd(t *testing.T) {
-	if testing.Short() {
-		t.Skip("end-to-end test performs a real REALITY handshake to the mimic host; skipped in -short mode")
-	}
 	logger := log.New(io.Discard, "", 0)
 	if testing.Verbose() {
 		logger = log.New(log.Writer(), "", log.LstdFlags)
@@ -58,12 +54,15 @@ func TestEndToEnd(t *testing.T) {
 	realityAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
 	ctrlAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
 
+	// Local REALITY mimic (TLS 1.3 + HTTP/2) — keeps the handshake offline.
+	mimic, mimicPort := startMimic(t)
+
 	// --- server sing-box (VLESS-REALITY inbound) ---
 	srvJSON, err := singbox.ServerConfigJSON(singbox.ServerParams{
 		ListenAddr: "127.0.0.1",
 		ListenPort: portOf(realityAddr),
 		MimicHost:  mimic,
-		MimicPort:  443,
+		MimicPort:  mimicPort,
 		PrivateKey: kp.PrivateKey,
 		ShortID:    shortID,
 		Users:      []singbox.User{{Name: "a", UUID: uuidA}, {Name: "b", UUID: uuidB}},
@@ -108,14 +107,14 @@ func TestEndToEnd(t *testing.T) {
 		{Mode: "tcp", Host: "ssh.dc.example.com", Upstream: echoTCP, Allow: []string{"203.0.113.0/24"}},
 		{Mode: "socks5", Host: "proxy.dc.example.com", AllowDest: []string{echoDest}},
 	}
-	ccA := startClient(t, socksA, publicAddr, uuidA, kp.PublicKey, shortID, ctrlAddr, nil, servicesA, logger)
+	ccA := startClient(t, socksA, publicAddr, mimic, uuidA, kp.PublicKey, shortID, ctrlAddr, nil, servicesA, logger)
 
 	// --- client B: a sub-location on the SAME shared host, no cert ---
 	socksB := fmt.Sprintf("127.0.0.1:%d", freePort(t))
 	servicesB := []control.ServiceReg{
 		{Mode: "http", Host: "app.dc.example.com", Path: "/teamb/", Upstream: originTeamB, StripPrefix: true},
 	}
-	startClient(t, socksB, publicAddr, uuidB, kp.PublicKey, shortID, ctrlAddr, nil, servicesB, logger)
+	startClient(t, socksB, publicAddr, mimic, uuidB, kp.PublicKey, shortID, ctrlAddr, nil, servicesB, logger)
 
 	waitFor(t, func() bool {
 		return reg.HasHTTPHost("dc.example.com") &&
@@ -194,7 +193,7 @@ func TestEndToEnd(t *testing.T) {
 
 // --- client wiring ---
 
-func startClient(t *testing.T, socksAddr, publicAddr, uuid, pubKey, shortID, ctrlAddr string, certs []control.CertReg, services []control.ServiceReg, logger *log.Logger) *control.Client {
+func startClient(t *testing.T, socksAddr, publicAddr, sni, uuid, pubKey, shortID, ctrlAddr string, certs []control.CertReg, services []control.ServiceReg, logger *log.Logger) *control.Client {
 	t.Helper()
 	host, _, _ := net.SplitHostPort(publicAddr)
 	cliJSON, err := singbox.ClientConfigJSON(singbox.ClientParams{
@@ -202,7 +201,7 @@ func startClient(t *testing.T, socksAddr, publicAddr, uuid, pubKey, shortID, ctr
 		ServerAddr:  host,
 		ServerPort:  portOf(publicAddr),
 		UUID:        uuid,
-		SNI:         mimic,
+		SNI:         sni,
 		PublicKey:   pubKey,
 		ShortID:     shortID,
 		LogLevel:    "error",
@@ -323,6 +322,29 @@ func (d tlsDialer) Dial(_, _ string) (net.Conn, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// startMimic runs a local TLS 1.3 + HTTP/2 server standing in for the REALITY
+// mimic host, so the end-to-end test performs no external network I/O and is
+// deterministic. REALITY borrows this server's certificate during the
+// handshake; for an authenticated client the tbox server takes over afterward,
+// so a self-signed local endpoint is sufficient. Returns the SNI host the
+// clients should send and the port the server dials for the handshake.
+func startMimic(t *testing.T) (string, uint16) {
+	t.Helper()
+	certPEM, keyPEM := genCert(t, "localhost")
+	cert, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	must(t, err)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	must(t, err)
+	srv := &http.Server{
+		Handler:   http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "mimic") }),
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13},
+	}
+	// ServeTLS configures HTTP/2 and negotiates ALPN h2 over the listener.
+	go func() { _ = srv.ServeTLS(ln, "", "") }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return "localhost", portOf(ln.Addr().String())
 }
 
 func startOrigin(t *testing.T, label string) string {

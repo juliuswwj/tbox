@@ -92,7 +92,7 @@ Makefile):
 
 ```sh
 make build        # -> bin/tbox
-make test         # unit + integration (integration makes a real handshake to the mimic host)
+make test         # unit + integration (a full REALITY tunnel against a local mimic; no network)
 ```
 
 Or install directly (the `with_utls` tag is required for REALITY):

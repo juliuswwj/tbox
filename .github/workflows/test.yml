@@ -9,7 +9,9 @@ permissions:
   contents: read
 
 jobs:
-  # Deterministic gate: lint, vet, build, and the unit tests (no network).
+  # Deterministic gate: lint, vet, build, and the full test suite. The
+  # end-to-end test drives a real VLESS-REALITY tunnel against a local mimic
+  # (TLS 1.3 + HTTP/2), so it needs no external network and runs here too.
   unit:
     runs-on: ubuntu-latest
     steps:
@@ -34,33 +36,5 @@ jobs:
       - name: build
         run: go build -tags with_utls ./...
 
-      - name: unit tests
-        # -short skips the end-to-end test (which needs a live REALITY handshake
-        # to the mimic host); these are deterministic and must always pass.
-        run: go test -tags with_utls -short -race -count=1 ./...
-
-  # Best-effort end-to-end test: a real VLESS-REALITY handshake to the mimic
-  # host (www.microsoft.com). Network-dependent, so retried a few times to
-  # absorb transient flakes on shared runners.
-  e2e:
-    runs-on: ubuntu-latest
-    needs: unit
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: end-to-end (retried)
-        run: |
-          for i in 1 2 3; do
-            if go test -tags with_utls -race -count=1 -run TestEndToEnd ./internal/integration/; then
-              exit 0
-            fi
-            echo "::warning::e2e attempt $i failed (likely transient network); retrying in 10s"
-            sleep 10
-          done
-          echo "::error::e2e failed after 3 attempts"
-          exit 1
+      - name: tests
+        run: go test -tags with_utls -race -count=1 ./...
