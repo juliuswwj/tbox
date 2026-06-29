@@ -43,6 +43,23 @@ clients:
 #   - cert_path: "/etc/tbox/dc.example.com.crt"   # SAN: dc.example.com, *.dc.example.com
 #     key_path:  "/etc/tbox/dc.example.com.key"
 
+# OPTIONAL: services the SERVER publishes directly. Same schema as a client's
+# `publish:`, but the server dials the upstream itself (no tunnel, no co-located
+# client) — use this to expose a service running on the VPS without a loopback
+# tbox client. The host must be covered by a cert above. socks5 is not supported
+# here (it needs a client-run SOCKS5 server); use https/wss/tcp.
+# publish:
+#   - url: "https://dc.example.com/"        # HTTP reverse proxy to a local service
+#     upstream: "127.0.0.1:3000"
+#   - url: "https://app.dc.example.com/admin/"
+#     upstream: "127.0.0.1:8080"
+#     strip_prefix: true                    # /admin/x -> /x on the upstream
+#   - url: "wss://app.dc.example.com/tunnel/ssh"   # raw TCP as a WebSocket
+#     upstream: "127.0.0.1:22"
+#   - url: "tcp://ssh.dc.example.com"        # TLS-terminated raw TCP (e.g. ssh)
+#     upstream: "127.0.0.1:22"
+#     allow: ["203.0.113.0/24"]             # source-IP whitelist (empty = allow all)
+
 # OPTIONAL: L2 tunnel hub (absorbs the udpt.py bridge as a native Go switch).
 # The server creates a TAP device and acts as a learning bridge whose ports are
 # each client's carrier stream plus this local TAP. Requires CAP_NET_ADMIN.

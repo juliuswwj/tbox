@@ -55,6 +55,11 @@ ordinary HTTPS traffic to a real site (e.g. `www.microsoft.com`):
   may be provided by the **server** (in `server.yaml`, avoiding client-side cert
   dependencies) or uploaded by a **client**. A service only needs *some* cert
   whose SAN covers its host.
+- **Services may be published by the server too.** Besides a client's `publish:`,
+  `server.yaml` accepts the same `publish:` block; the server then dials the
+  upstream itself (no tunnel, no client). Use it to expose a service running on
+  the VPS without a loopback tbox client. Supports `https`/`wss`/`tcp` (not
+  `socks5`, which needs a client-run SOCKS5 server); the host needs a server cert.
 - The **client** runs an embedded sing-box (SOCKS5H inbound + VLESS-REALITY
   outbound). Forward proxying is pure sing-box. For publishing it opens one
   carrier connection through the tunnel and runs a

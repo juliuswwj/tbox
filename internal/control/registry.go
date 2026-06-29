@@ -53,6 +53,16 @@ func (s *Service) OpenStream() (net.Conn, error) {
 	return stream, nil
 }
 
+// Dial returns a connection to the service upstream. For a client-owned service
+// it opens a reverse stream to that client (which dials the upstream locally);
+// for a server-owned service (no session) it dials the upstream directly.
+func (s *Service) Dial() (net.Conn, error) {
+	if s.Session == nil {
+		return net.Dial("tcp", s.Upstream)
+	}
+	return s.OpenStream()
+}
+
 // isRaw reports whether a mode is a whole-host, TLS-terminate-then-raw service.
 func isRaw(mode string) bool { return mode == "tcp" || mode == "socks5" }
 
@@ -136,6 +146,19 @@ func (r *Registry) LookupCert(sni string) (*tls.Certificate, bool) {
 		}
 	}
 	return nil, false
+}
+
+// ServerOwnerID identifies services published by the server itself (dialed
+// directly, no client session). The NUL byte cannot occur in a client UUID, so
+// it never collides with a real client.
+const ServerOwnerID = "\x00server"
+
+// RegisterServer registers services the server publishes directly: they have no
+// client session (Service.Dial dials the upstream itself) and are permanent for
+// the process lifetime. Conflict checks run against any client services, so a
+// client cannot later take over a host/path the server owns.
+func (r *Registry) RegisterServer(services []ServiceReg) error {
+	return r.Register(ServerOwnerID, nil, nil, services)
 }
 
 // Register replaces a client's certs and services. Hosts/paths are

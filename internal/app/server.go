@@ -78,6 +78,16 @@ func RunServer(cfg *config.ServerConfig) error {
 	if len(cfg.Certs) > 0 {
 		logger.Printf("loaded %d server-provided certificate(s)", len(cfg.Certs))
 	}
+	if len(cfg.Publish) > 0 {
+		svcs, err := buildServices(cfg.Publish)
+		if err != nil {
+			return fmt.Errorf("publish: %w", err)
+		}
+		if err := reg.RegisterServer(svcs); err != nil {
+			return fmt.Errorf("publish: %w", err)
+		}
+		logger.Printf("published %d server-side service(s)", len(svcs))
+	}
 	hub, tunCleanup, err := setupTunHub(cfg, logger)
 	if err != nil {
 		return fmt.Errorf("tun: %w", err)

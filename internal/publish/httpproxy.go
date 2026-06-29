@@ -9,12 +9,13 @@ import (
 	"github.com/juliuswwj/tbox/internal/control"
 )
 
-// newReverseProxy builds a ReverseProxy whose transport dials a fresh reverse
-// stream to the service's owning client for every connection.
+// newReverseProxy builds a ReverseProxy whose transport dials the service
+// upstream for every connection: a fresh reverse stream to the owning client,
+// or a direct dial for a server-owned service.
 func newReverseProxy(svc *control.Service, logger Logger) *httputil.ReverseProxy {
 	transport := &http.Transport{
 		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-			return svc.OpenStream()
+			return svc.Dial()
 		},
 		// Each request dials a brand-new reverse stream; pooling across the
 		// shared yamux session buys little and complicates lifetime, so disable it.

@@ -23,7 +23,7 @@ func (h *Handler) serveWS(w http.ResponseWriter, r *http.Request, svc *control.S
 		return
 	}
 
-	stream, err := svc.OpenStream()
+	stream, err := svc.Dial()
 	if err != nil {
 		h.logger.Printf("publish: ws %s open stream to %s: %v", r.Host, svc.Upstream, err)
 		_ = c.Close(websocket.StatusInternalError, "upstream unavailable")

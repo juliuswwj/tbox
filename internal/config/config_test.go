@@ -1,6 +1,11 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestExampleConfigsParse(t *testing.T) {
 	if _, err := LoadServer("../../configs/server.example.yaml"); err != nil {
@@ -35,6 +40,66 @@ func TestClientConfigDefaultsAndURLs(t *testing.T) {
 			t.Fatalf("expected example to exercise %q mode; got %v", want, modes)
 		}
 	}
+}
+
+func TestServerPublish(t *testing.T) {
+	const base = `
+listen: ":443"
+server_addr: "vps.example.com"
+mimic: "www.microsoft.com:443"
+reality_private_key: "k"
+short_id: "s"
+clients:
+  - name: "c1"
+    uuid: "u1"
+`
+	write := func(t *testing.T, extra string) string {
+		t.Helper()
+		dir := t.TempDir()
+		p := filepath.Join(dir, "server.yaml")
+		if err := os.WriteFile(p, []byte(base+extra), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	t.Run("accepts https/wss/tcp", func(t *testing.T) {
+		c, err := LoadServer(write(t, `
+publish:
+  - url: "https://dc.example.com/"
+    upstream: "127.0.0.1:3000"
+  - url: "wss://dc.example.com/ws"
+    upstream: "127.0.0.1:22"
+  - url: "tcp://ssh.dc.example.com"
+    upstream: "127.0.0.1:22"
+`))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(c.Publish) != 3 {
+			t.Fatalf("want 3 publish entries, got %d", len(c.Publish))
+		}
+	})
+
+	t.Run("rejects socks5", func(t *testing.T) {
+		_, err := LoadServer(write(t, `
+publish:
+  - url: "socks5://proxy.dc.example.com"
+`))
+		if err == nil || !strings.Contains(err.Error(), "socks5") {
+			t.Fatalf("want socks5 rejection, got %v", err)
+		}
+	})
+
+	t.Run("requires upstream", func(t *testing.T) {
+		_, err := LoadServer(write(t, `
+publish:
+  - url: "https://dc.example.com/"
+`))
+		if err == nil || !strings.Contains(err.Error(), "upstream") {
+			t.Fatalf("want upstream-required error, got %v", err)
+		}
+	})
 }
 
 func TestPublishParse(t *testing.T) {

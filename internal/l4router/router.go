@@ -149,9 +149,9 @@ func (r *Router) handleRaw(svc *control.Service, conn net.Conn, remote net.Addr)
 	}
 	_ = tlsConn.SetDeadline(time.Time{})
 
-	stream, err := svc.OpenStream()
+	stream, err := svc.Dial()
 	if err != nil {
-		r.logger.Printf("l4: %s open reverse stream: %v", svc.ID(), err)
+		r.logger.Printf("l4: %s dial upstream: %v", svc.ID(), err)
 		_ = tlsConn.Close()
 		return
 	}

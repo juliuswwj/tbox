@@ -110,6 +110,56 @@ func TestServerCertWithClientServices(t *testing.T) {
 	}
 }
 
+func TestServerOwnedServiceDialsDirectly(t *testing.T) {
+	// A real listener stands in for a local upstream the server dials directly.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	reg := NewRegistry()
+	if err := reg.RegisterServer([]ServiceReg{
+		{Mode: "http", Host: "dc.example.com", Path: "/", Upstream: ln.Addr().String()},
+	}); err != nil {
+		t.Fatalf("RegisterServer: %v", err)
+	}
+
+	svcs := reg.HTTPServices("dc.example.com")
+	if len(svcs) != 1 {
+		t.Fatalf("want 1 server service, got %d", len(svcs))
+	}
+	svc := svcs[0]
+	if svc.Session != nil {
+		t.Fatal("server-owned service must have no session")
+	}
+	if svc.ClientID != ServerOwnerID {
+		t.Fatalf("want owner %q, got %q", ServerOwnerID, svc.ClientID)
+	}
+
+	accepted := make(chan struct{})
+	go func() { c, _ := ln.Accept(); if c != nil { close(accepted); c.Close() } }()
+
+	conn, err := svc.Dial()
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	select {
+	case <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server-owned Dial did not connect to the upstream listener")
+	}
+
+	// A client cannot take over a host/path the server already owns.
+	sB := newSession(t)
+	if err := reg.Register("B", sB, nil, []ServiceReg{
+		{Mode: "http", Host: "dc.example.com", Path: "/", Upstream: "127.0.0.1:2"},
+	}); err == nil {
+		t.Fatal("expected conflict against server-owned path")
+	}
+}
+
 func TestConflicts(t *testing.T) {
 	reg := NewRegistry()
 	sA := newSession(t)

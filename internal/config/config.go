@@ -70,6 +70,10 @@ type ServerConfig struct {
 	// Certs are TLS certificates the server provides for published domains, so
 	// clients need not ship their own (avoids client-side cert dependencies).
 	Certs []CertFile `yaml:"certs"`
+	// Publish are services the server exposes directly: the server dials the
+	// upstream itself (no tunnel, no co-located client). socks5 is not supported
+	// here. The host must be covered by a server-provided cert (see Certs).
+	Publish []Publish `yaml:"publish"`
 	// Tun enables the L2 (TAP) tunnel data plane on the server (the hub).
 	Tun ServerTun `yaml:"tun"`
 	// Ban enables fail2ban-style throttling of the HTTP publishing path.
@@ -213,6 +217,30 @@ func (p Publish) Parse() (mode, host, path string, err error) {
 	return mode, host, path, nil
 }
 
+// validatePublish checks a publish list. When serverSide is true the entries are
+// dialed directly by the server, so socks5 (which needs a client-run SOCKS5
+// server) is rejected.
+func validatePublish(pubs []Publish, serverSide bool) error {
+	for i := range pubs {
+		p := &pubs[i]
+		mode, _, _, err := p.Parse()
+		if err != nil {
+			return fmt.Errorf("publish[%d]: %w", i, err)
+		}
+		if mode == "socks5" {
+			if serverSide {
+				return fmt.Errorf("publish[%d] (%s): server publish does not support socks5", i, p.URL)
+			}
+			if _, err := destallow.New(p.AllowDest); err != nil {
+				return fmt.Errorf("publish[%d] (%s): %w", i, p.URL, err)
+			}
+		} else if p.Upstream == "" {
+			return fmt.Errorf("publish[%d] (%s): upstream is required", i, p.URL)
+		}
+	}
+	return nil
+}
+
 // LoadServer reads and validates a server config file.
 func LoadServer(path string) (*ServerConfig, error) {
 	var c ServerConfig
@@ -239,6 +267,9 @@ func LoadServer(path string) (*ServerConfig, error) {
 	}
 	if len(c.Clients) == 0 {
 		return nil, fmt.Errorf("at least one client is required")
+	}
+	if err := validatePublish(c.Publish, true); err != nil {
+		return nil, err
 	}
 	if c.Tun.Enable {
 		if err := validateServerTun(&c.Tun); err != nil {
@@ -357,19 +388,8 @@ func LoadClient(path string) (*ClientConfig, error) {
 	if c.Token == "" {
 		return nil, fmt.Errorf("token is required")
 	}
-	for i := range c.Publish {
-		p := &c.Publish[i]
-		mode, _, _, err := p.Parse()
-		if err != nil {
-			return nil, fmt.Errorf("publish[%d]: %w", i, err)
-		}
-		if mode == "socks5" {
-			if _, err := destallow.New(p.AllowDest); err != nil {
-				return nil, fmt.Errorf("publish[%d] (%s): %w", i, p.URL, err)
-			}
-		} else if p.Upstream == "" {
-			return nil, fmt.Errorf("publish[%d] (%s): upstream is required", i, p.URL)
-		}
+	if err := validatePublish(c.Publish, false); err != nil {
+		return nil, err
 	}
 	if c.Tun.Enable {
 		if c.Tun.TAP == nil && c.Tun.UDP == nil {
