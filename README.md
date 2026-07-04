@@ -27,8 +27,11 @@ ordinary HTTPS traffic to a real site (e.g. `www.microsoft.com`):
    carrier. The server is a learning bridge (a native Go re-implementation of
    the `udpt.py` UDP bridge); clients join as nodes either through their own TAP
    device or by letting **unmodified `udpt.py` clients** connect to a local UDP
-   socket. Supports a virtual subnet, global egress (v4 NAT), and IPv6
-   transparent passthrough (`ndppd`). See [L2 tunnel](#l2-tunnel-tap).
+   socket. An **embedded DHCPv4 server** on the server TAP hands out pool
+   addresses to every L2 peer — native tbox client or `udpt.py` alike — so no
+   client needs a hard-coded `--ip`. Supports a virtual subnet, global egress
+   (v4 NAT), and IPv6 transparent passthrough (`ndppd`). See
+   [L2 tunnel](#l2-tunnel-tap).
 
 ```
  local apps ──socks5h──▶ tbox client ══VLESS-REALITY══▶ tbox server (VPS) ──▶ internet
@@ -139,6 +142,49 @@ tbox whitelist -c client.yaml add    tcp://ssh.dc.example.com 198.51.100.7/32
 tbox whitelist -c client.yaml remove tcp://ssh.dc.example.com 203.0.113.0/24
 ```
 
+## Android client (VPN)
+
+An Android app in [`android/`](android/) turns the same `tbox://` token into a
+system VPN: it captures all device traffic through a tun interface and sends it
+out the VLESS-REALITY tunnel. There is no custom protocol — the app embeds the
+same sing-box VLESS-REALITY outbound the desktop client uses, fronted by a tun
+inbound (via sing-box's `libbox` runtime), instead of a local SOCKS listener.
+
+The tbox-specific logic (token format, REALITY field mapping, tun config) lives
+in Go under [`mobile/`](mobile/) and reuses `internal/token` and
+`internal/singbox`, so it stays in lockstep with the server. The Kotlin app is a
+thin `VpnService` + UI that implements sing-box's `PlatformInterface` (its
+`OpenTun` builds the tun; `AutoDetectInterfaceControl` maps to
+`VpnService.protect`, which keeps the carrier socket to the server off the
+tunnel).
+
+Prerequisites: a Go toolchain, the Android SDK **and NDK**, and
+`ANDROID_HOME`/`ANDROID_NDK_HOME` exported. The repo includes a Gradle wrapper,
+so you do not need a system Gradle.
+
+```sh
+# one-time: install the gomobile toolchain
+make android-tools
+
+# build the native AAR (bundles ./mobile + sing-box libbox, with_utls tag)
+make android
+
+# build the APK in one shot (AAR + gradlew assembleDebug)
+make android-apk
+adb install android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+Releases: every `v*` tag pushes both desktop binaries (per-OS/arch archives) and
+the Android APK to the GitHub release — see
+[`.github/workflows/release.yml`](.github/workflows/release.yml). The Android
+job sets up Go, JDK 17, the Android SDK + NDK, runs `make android` then
+`make android-apk`, and uploads `tbox_<version>_android.apk`.
+
+Then open the app, paste the `tbox://` token (the same one `tbox add-client`
+prints), and tap **Connect**. By default it routes everything (`0.0.0.0/0`) with
+DNS through the tunnel; the carrier server's own address is resolved directly so
+the tunnel can come up.
+
 ## L2 tunnel (TAP)
 
 The L2 tunnel turns the carrier into an Ethernet segment shared by the server
@@ -179,13 +225,15 @@ UDP port is exposed to the internet, so the "looks like HTTPS" property holds).
 - **Connecting `udpt.py`** (unchanged) to a client's UDP endpoint:
 
   ```sh
-  python3 udpt.py --target 127.0.0.1:3390 --tap tap0 --ip 10.42.0.20/24
+  python3 udpt.py --target 127.0.0.1:3390 --tap tap0
   ```
 
   Each udpt peer is a distinct switch port, so multiple udpt clients on one tbox
   client reach each other locally and reach the server-side segment over the
-  tunnel. Virtual IPs are either server-assigned (native TAP) or self-configured
-  (`udpt.py --ip`).
+  tunnel. Virtual IPs are handed out by the server's embedded DHCPv4 server, so
+  native tbox clients and unmodified `udpt.py` peers get an address the same
+  way — via standard DORA on the L2 segment. (Pass `udpt.py --ip ...` only if
+  you want to override the DHCP lease with a static address.)
 
 - **Bridging a local segment** (client): set `tap.bridge: br0` to enslave the
   TAP to a Linux bridge (tbox creates it if missing) and put the address on the

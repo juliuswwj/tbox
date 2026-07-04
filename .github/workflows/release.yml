@@ -63,3 +63,65 @@ jobs:
             dist/*.zip
             dist/*.sha256
           generate_release_notes: true
+
+  # Android client APK, built from the same release tag. Produces app-debug.apk
+  # (which carries the Carrier tun client, libbox runtime, and the tbox gomobile
+  # helper). The APK is large (several ABI .so files) but is the only artifact a
+  # user needs on-device.
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK + NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-34
+            build-tools;34.0.0
+            ndk;27.1.12297006
+
+      - name: Set NDK env
+        run: echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.1.12297006" >> "$GITHUB_ENV"
+
+      - name: Install gomobile toolchain
+        # The go.mod already carries a `tool golang.org/x/mobile/cmd/gobind`
+        # directive, so we just install the gomobile/gobind binaries above —
+        # `go install` picks the version pinned by the tool line automatically.
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+
+      - name: Build AAR (gomobile bind)
+        run: make android
+
+      - name: Build debug APK (gradlew assembleDebug)
+        run: make android-apk
+
+      - name: Stage APK with a release-tagged name
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+             "dist/tbox_${VERSION}_android.apk"
+          sha256sum "dist/tbox_${VERSION}_android.apk" > \
+                    "dist/tbox_${VERSION}_android.apk.sha256"
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/tbox_${{ github.ref_name }}_android.apk
+            dist/tbox_${{ github.ref_name }}_android.apk.sha256
+          generate_release_notes: true

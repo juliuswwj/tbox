@@ -67,10 +67,13 @@ publish:
 #     name: "tbox0"
 #     # bridge: "br0"                    # enslave TAP to br0 (auto-created); IP goes on br0
 #     # bridge_members: ["eth1"]         # also enslave these local NICs to br0
-#     # ipv4_cidr: "10.42.0.9/24"        # omit to use the server-assigned address
+#     # ipv4_cidr: "10.42.0.9/24"        # OPTIONAL manual static IP; omit to use DHCP
+#     # dhcp: true                      # default true when ipv4_cidr is unset —
+#                                       # obtains the IPv4 from the server's embedded
+#                                       # DHCPv4 server via DORA on this TAP.
 #     # ipv6: "2001:db8:0:42::9/80"
 #     # routes:                          # extra routes on the TAP/bridge
 #     #   - "192.168.9.0/24"             #   link-scoped via the device
 #     #   - "10.9.0.0/16 via 10.42.0.1"  #   via a gateway
-#   udp:                           # udpt.py entrypoint: run `udpt.py --target 127.0.0.1:3390 --ip ...`
+#   udp:                           # udpt.py entrypoint: run `udpt.py --target 127.0.0.1:3390`
 #     listen: "127.0.0.1:3390"

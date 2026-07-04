@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/yamux"
 
 	"github.com/juliuswwj/tbox/internal/destallow"
+	"github.com/juliuswwj/tbox/internal/dhcpclient"
 	"github.com/juliuswwj/tbox/internal/l2"
 	"github.com/juliuswwj/tbox/internal/socks5"
 	"github.com/juliuswwj/tbox/internal/tunnel"
@@ -25,8 +26,9 @@ type ClientTunParams struct {
 	TAPName            string
 	TAPBridge          string   // "" = no bridge; else enslave TAP to this (auto-created) bridge
 	TAPBridgeMembers   []string // extra local NICs to enslave to the bridge
-	TAPv4              string   // manual CIDR override; "" uses the server assignment
+	TAPv4              string   // manual CIDR override; "" uses DHCP
 	TAPv6              string
+	TAPDHCP            bool       // when true and TAPv4 == "", obtain IP via DHCPv4
 	TAPRoutes          []l2.Route // extra routes on the TAP/bridge device
 	UDPListen          string     // "" disables the udpt UDP endpoint
 	AcceptDefaultRoute bool
@@ -41,12 +43,13 @@ type DialFunc func(ctx context.Context) (net.Conn, error)
 // authenticates, registers published services, serves reverse streams by
 // dialing local upstreams, and supports runtime whitelist updates.
 type Client struct {
-	uuid     string
-	dial     DialFunc
-	certs    []CertReg
-	services []ServiceReg
-	tun      *ClientTunParams // nil = tunnel disabled
-	logger   *log.Logger
+	uuid         string
+	dial         DialFunc
+	certs        []CertReg
+	services     []ServiceReg
+	tun          *ClientTunParams // nil = tunnel disabled
+	serverRealIP string           // carrier's real host (or IP) — used to pin default-route exception
+	logger       *log.Logger
 
 	serviceByID map[string]ServiceReg
 	destSets    map[string]*destallow.Set // socks5 service id -> allowed destinations
@@ -61,7 +64,10 @@ type Client struct {
 
 // NewClient builds a control client. certs are the (optional) client-provided
 // certificates; services are the published services with initial allow lists.
-func NewClient(uuid string, certs []CertReg, services []ServiceReg, tun *ClientTunParams, dial DialFunc, logger *log.Logger) *Client {
+// serverRealIP is the carrier's real host (hostname or IP) used by the tun
+// default-route pin so the encrypted TCP connection to the server is not
+// captured by the tunnel's own default route. Pass "" to disable the pin.
+func NewClient(uuid string, certs []CertReg, services []ServiceReg, tun *ClientTunParams, serverRealIP string, dial DialFunc, logger *log.Logger) *Client {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -82,15 +88,16 @@ func NewClient(uuid string, certs []CertReg, services []ServiceReg, tun *ClientT
 		}
 	}
 	return &Client{
-		uuid:        uuid,
-		dial:        dial,
-		certs:       certs,
-		services:    services,
-		tun:         tun,
-		logger:      logger,
-		serviceByID: byID,
-		destSets:    destSets,
-		whitelists:  whitelists,
+		uuid:         uuid,
+		dial:         dial,
+		certs:        certs,
+		services:     services,
+		tun:          tun,
+		serverRealIP: serverRealIP,
+		logger:       logger,
+		serviceByID:  byID,
+		destSets:     destSets,
+		whitelists:   whitelists,
 	}
 }
 
@@ -151,8 +158,7 @@ func (c *Client) session(ctx context.Context) error {
 	if err := c.request(Message{Type: TypeAuth, UUID: c.uuid}); err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
-	resp, err := c.requestResp(Message{Type: TypeRegister, Certs: c.certs, Services: c.currentServices()})
-	if err != nil {
+	if err := c.request(Message{Type: TypeRegister, Certs: c.certs, Services: c.currentServices()}); err != nil {
 		return fmt.Errorf("register: %w", err)
 	}
 	c.logger.Printf("control: connected, registered %d cert(s), %d service(s)", len(c.certs), len(c.services))
@@ -160,7 +166,7 @@ func (c *Client) session(ctx context.Context) error {
 	go c.acceptLoop(sess)
 
 	if c.tun != nil {
-		node, err := c.startTun(sess, resp.Tun)
+		node, err := c.startTun(sess)
 		if err != nil {
 			c.logger.Printf("control: tun setup failed: %v", err)
 		} else {
@@ -303,9 +309,12 @@ func (c *Client) requestResp(m Message) (Message, error) {
 	return resp, nil
 }
 
-// startTun opens the L2 data stream, applies the server assignment, and starts
-// the client-side node (uplink + optional native TAP + optional UDP endpoint).
-func (c *Client) startTun(sess *yamux.Session, asg *TunAssignment) (*l2.ClientNode, error) {
+// startTun opens the L2 data stream, applies the client's L2 configuration
+// (native TAP and/or UDP endpoint), and — when native TAP is enabled without a
+// manual IPv4 — obtains an address via DHCPv4 from the server's embedded DHCP
+// server. It never relies on any in-protocol IP assignment: the register ack
+// carries only the certs/services ack.
+func (c *Client) startTun(sess *yamux.Session) (*l2.ClientNode, error) {
 	stream, err := sess.OpenStream()
 	if err != nil {
 		return nil, fmt.Errorf("open tun stream: %w", err)
@@ -327,22 +336,16 @@ func (c *Client) startTun(sess *yamux.Session, asg *TunAssignment) (*l2.ClientNo
 		switch {
 		case c.tun.TAPv4 != "":
 			tap.IPv4CIDR = c.tun.TAPv4
-		case asg != nil:
-			tap.IPv4CIDR = asg.IPv4CIDR
-		}
-		if asg != nil {
-			tap.Gateway = asg.Gateway
-			tap.SubnetRoute = asg.SubnetRoute
-			tap.ServerRealIP = asg.ServerRealIP
-			tap.DefaultRoute = c.tun.AcceptDefaultRoute && asg.DefaultRoute
-			if opts.MTU == 0 {
-				opts.MTU = asg.MTU
-			}
+		case c.tun.TAPDHCP:
+			// Leave IPv4CIDR empty; DHCPv4 will assign it after the TAP is up.
+		default:
+			// No static IP and DHCP disabled: only useful when bridging a
+			// local segment (pure L2).
 		}
 		// An address-less TAP is fine when bridging (pure L2 bridge of a local
 		// segment); otherwise we need an address to be useful.
-		if tap.IPv4CIDR == "" && tap.Bridge == "" {
-			c.logger.Printf("control: tun TAP enabled but no IPv4 and no bridge; skipping native TAP")
+		if tap.IPv4CIDR == "" && !c.tun.TAPDHCP && tap.Bridge == "" {
+			c.logger.Printf("control: tun TAP enabled but no IPv4, no DHCP, and no bridge; skipping native TAP")
 		} else {
 			opts.TAP = tap
 		}
@@ -357,5 +360,58 @@ func (c *Client) startTun(sess *yamux.Session, asg *TunAssignment) (*l2.ClientNo
 		_ = stream.Close()
 		return nil, err
 	}
+
+	// If we have a native TAP and the user wants DHCP, run DORA now (after the
+	// TAP is up and bridged, so the OS can speak DHCP on the right device).
+	if c.tun.TAPEnable && c.tun.TAPv4 == "" && c.tun.TAPDHCP && opts.TAP != nil {
+		ipDev := opts.TAP.Name
+		if opts.TAP.Bridge != "" {
+			ipDev = opts.TAP.Bridge
+		}
+		if err := c.runDHCP(ipDev, opts.TAP); err != nil {
+			c.logger.Printf("control: tun DHCP on %s failed: %v", ipDev, err)
+		}
+	}
+
 	return node, nil
+}
+
+// runDHCP performs a one-shot DHCPv4 DORA on ipDev and installs the leased
+// IPv4, subnet route, and (when AcceptDefaultRoute is set) a default route via
+// the offered gateway. If the server's DHCP ACK provides a router option, we
+// also pin the carrier's real host route so the encrypted TCP to the server is
+// not captured by the tunnel's own default route.
+func (c *Client) runDHCP(ipDev string, tap *l2.ClientTAP) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	lease, err := dhcpclient.Discover(ctx, ipDev, c.logger)
+	if err != nil {
+		return err
+	}
+	ones, _ := lease.SubnetMask.Size()
+	if ones == 0 {
+		return fmt.Errorf("DHCP ACK missing subnet mask")
+	}
+	cidr := fmt.Sprintf("%s/%d", lease.IPv4.String(), ones)
+	if err := l2.AddAddr(ipDev, cidr); err != nil {
+		return fmt.Errorf("apply leased addr %s: %w", cidr, err)
+	}
+	// Subnet route (link-scoped) for the assigned prefix.
+	subnet := &net.IPNet{IP: lease.IPv4.Mask(lease.SubnetMask), Mask: lease.SubnetMask}
+	if err := l2.AddRoute(ipDev, subnet.String()); err != nil {
+		c.logger.Printf("control: tun DHCP subnet route %s: %v", subnet.String(), err)
+	}
+	// Default route via the carrier, if the user opted in and the ACK offered a router.
+	if c.tun.AcceptDefaultRoute && lease.Gateway != nil && lease.DefaultRoute {
+		if c.serverRealIP != "" {
+			if err := l2.AddHostRouteViaCurrentGateway(c.serverRealIP); err != nil {
+				c.logger.Printf("control: pin carrier host route %s: %v", c.serverRealIP, err)
+			}
+		}
+		if err := l2.AddDefaultRoute(ipDev, lease.Gateway.String()); err != nil {
+			return fmt.Errorf("default route via %s: %w", lease.Gateway.String(), err)
+		}
+	}
+	c.logger.Printf("control: tun DHCP applied %s on %s", cidr, ipDev)
+	return nil
 }

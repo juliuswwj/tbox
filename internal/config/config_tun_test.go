@@ -118,6 +118,50 @@ func TestClientTunValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("dhcp defaults true when ipv4_cidr unset", func(t *testing.T) {
+		c, err := LoadClient(writeTemp(t, base+`tun:
+  enable: true
+  tap: {}
+`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Tun.TAP.DHCP == nil || !*c.Tun.TAP.DHCP {
+			t.Fatalf("dhcp default = %+v, want true", c.Tun.TAP.DHCP)
+		}
+	})
+
+	t.Run("dhcp explicit false respected", func(t *testing.T) {
+		c, err := LoadClient(writeTemp(t, base+`tun:
+  enable: true
+  tap:
+    dhcp: false
+`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Tun.TAP.DHCP == nil || *c.Tun.TAP.DHCP {
+			t.Fatalf("dhcp = %+v, want false", c.Tun.TAP.DHCP)
+		}
+	})
+
+	t.Run("dhcp ignored when ipv4_cidr set", func(t *testing.T) {
+		// A static IPv4 takes precedence; DHCP remains whatever the user set
+		// (or its default) but the client never sends a Discover when TAPv4
+		// is non-empty. We only verify the static value parses.
+		c, err := LoadClient(writeTemp(t, base+`tun:
+  enable: true
+  tap:
+    ipv4_cidr: "10.42.0.9/24"
+`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Tun.TAP.IPv4CIDR != "10.42.0.9/24" {
+			t.Fatalf("ipv4_cidr = %q", c.Tun.TAP.IPv4CIDR)
+		}
+	})
+
 	t.Run("bridge with members and routes", func(t *testing.T) {
 		if _, err := LoadClient(writeTemp(t, base+`tun:
   enable: true

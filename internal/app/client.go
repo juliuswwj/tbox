@@ -70,7 +70,7 @@ func RunClient(cfg *config.ClientConfig) error {
 		return err
 	}
 
-	cc := control.NewClient(tok.UUID, certs, services, buildTunParams(cfg.Tun), dial, logger)
+	cc := control.NewClient(tok.UUID, certs, services, buildTunParams(cfg.Tun), tok.ServerAddr, dial, logger)
 
 	if cfg.AdminListen != "" {
 		adminLn, err := net.Listen("tcp", cfg.AdminListen)
@@ -151,6 +151,9 @@ func buildTunParams(t config.ClientTun) *control.ClientTunParams {
 		p.TAPBridgeMembers = t.TAP.BridgeMembers
 		p.TAPv4 = t.TAP.IPv4CIDR
 		p.TAPv6 = t.TAP.IPv6
+		if t.TAP.DHCP != nil {
+			p.TAPDHCP = *t.TAP.DHCP
+		}
 		for _, r := range t.TAP.Routes {
 			dst, gw, _ := config.ParseTunRoute(r) // already validated at load
 			p.TAPRoutes = append(p.TAPRoutes, l2.Route{Dst: dst, Gw: gw})

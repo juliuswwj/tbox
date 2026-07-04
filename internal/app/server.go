@@ -16,6 +16,7 @@ import (
 	"github.com/juliuswwj/tbox/internal/ban"
 	"github.com/juliuswwj/tbox/internal/config"
 	"github.com/juliuswwj/tbox/internal/control"
+	"github.com/juliuswwj/tbox/internal/dhcpserver"
 	"github.com/juliuswwj/tbox/internal/l2"
 	"github.com/juliuswwj/tbox/internal/l4router"
 	"github.com/juliuswwj/tbox/internal/singbox"
@@ -88,7 +89,10 @@ func RunServer(cfg *config.ServerConfig) error {
 		}
 		logger.Printf("published %d server-side service(s)", len(svcs))
 	}
-	hub, tunCleanup, err := setupTunHub(cfg, logger)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	hub, tunCleanup, err := setupTunHub(ctx, cfg, logger)
 	if err != nil {
 		return fmt.Errorf("tun: %w", err)
 	}
@@ -116,8 +120,6 @@ func RunServer(cfg *config.ServerConfig) error {
 	errc := make(chan error, 1)
 	go func() { errc <- router.ListenAndServe(cfg.Listen) }()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	select {
 	case <-ctx.Done():
 		logger.Printf("shutting down")
@@ -164,9 +166,11 @@ func setupBanner(cfg *config.ServerConfig, logger *log.Logger) (*ban.Banner, err
 
 // setupTunHub starts the server-side L2 tunnel hub when enabled: it creates the
 // TAP device, brings it up with the gateway address, optionally enables NAT
-// egress and IPv6 passthrough, and starts the local TAP read loop. It returns
-// the hub (nil when disabled) and a cleanup to run at shutdown.
-func setupTunHub(cfg *config.ServerConfig, logger *log.Logger) (*control.TunHub, func(), error) {
+// egress and IPv6 passthrough, starts the local TAP read loop, and launches an
+// embedded DHCPv4 server on the TAP that hands out pool addresses to any L2
+// peer (native tbox client or unmodified udpt.py). It returns the hub (nil when
+// disabled) and a cleanup to run at shutdown.
+func setupTunHub(ctx context.Context, cfg *config.ServerConfig, logger *log.Logger) (*control.TunHub, func(), error) {
 	noop := func() {}
 	if !cfg.Tun.Enable {
 		return nil, noop, nil
@@ -222,11 +226,35 @@ func setupTunHub(cfg *config.ServerConfig, logger *log.Logger) (*control.TunHub,
 		natCleanup = func() { _ = cleanup() }
 	}
 
-	hub := control.NewTunHub(sw, cfg.Tun.Gateway, poolNet, cfg.Tun.MTU, cfg.Tun.EnableNAT, cfg.ServerAddr, logger)
+	hub := control.NewTunHub(sw, logger)
 	logger.Printf("tun hub: TAP %s, gateway %s, pool %s (nat=%v, passthrough=%v)",
 		name, cfg.Tun.Gateway, cfg.Tun.PoolV4, cfg.Tun.EnableNAT, cfg.Tun.EnablePassthrough)
 
+	// Embedded DHCPv4 server: sole IP-allocation authority on the virtual
+	// segment. Hands out pool addresses to native tbox clients and to
+	// unmodified udpt.py peers alike.
+	gwIP := net.ParseIP(cfg.Tun.Gateway)
+	if gwIP == nil {
+		_ = dev.Close()
+		return nil, noop, fmt.Errorf("invalid gateway %q", cfg.Tun.Gateway)
+	}
+	dhcpSrv, err := dhcpserver.New(dhcpserver.Config{
+		Iface:             name,
+		Pool:              poolNet,
+		Gateway:           gwIP,
+		OfferDefaultRoute: cfg.Tun.EnableNAT,
+	}, logger)
+	if err != nil {
+		_ = dev.Close()
+		return nil, noop, fmt.Errorf("dhcp server: %w", err)
+	}
+	if err := dhcpSrv.Start(ctx); err != nil {
+		_ = dev.Close()
+		return nil, noop, fmt.Errorf("dhcp server start: %w", err)
+	}
+
 	cleanup := func() {
+		_ = dhcpSrv.Close()
 		natCleanup()
 		_ = dev.Close()
 	}

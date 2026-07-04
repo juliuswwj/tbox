@@ -219,7 +219,7 @@ func startClient(t *testing.T, socksAddr, publicAddr, sni, uuid, pubKey, shortID
 	dial := func(ctx context.Context) (net.Conn, error) {
 		return ctxDialer.DialContext(ctx, "tcp", ctrlAddr)
 	}
-	cc := control.NewClient(uuid, certs, services, nil, dial, logger)
+	cc := control.NewClient(uuid, certs, services, nil, "", dial, logger)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go cc.Run(ctx)

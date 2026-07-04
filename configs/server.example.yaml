@@ -60,16 +60,21 @@ clients:
 #     upstream: "127.0.0.1:22"
 #     allow: ["203.0.113.0/24"]             # source-IP whitelist (empty = allow all)
 
-# OPTIONAL: L2 tunnel hub (absorbs the udpt.py bridge as a native Go switch).
-# The server creates a TAP device and acts as a learning bridge whose ports are
-# each client's carrier stream plus this local TAP. Requires CAP_NET_ADMIN.
+# OPTIONAL: L2 tunnel hub. The server creates a TAP device and acts as a
+# learning bridge whose ports are each client's carrier stream plus this local
+# TAP. An embedded DHCPv4 server listens on the TAP and hands out pool
+# addresses to any L2 peer — native tbox client or unmodified udpt.py — so
+# clients no longer need an explicit `--ip`. Requires CAP_NET_ADMIN.
 # tun:
 #   enable: true
 #   tap_name: "tbox0"
 #   pool_v4: "10.42.0.0/24"        # virtual subnet; gateway defaults to .1
 #   # gateway: "10.42.0.1"
 #   mtu: 1448
-#   enable_nat: true               # MASQUERADE pool_v4 for global egress
+#   enable_nat: true               # MASQUERADE pool_v4 for global egress; also
+#                                  # makes the DHCP ACK include the default-route
+#                                  # option so clients install a default route
+#                                  # through the tunnel.
 #   wan_interface: "eth0"          # required when enable_nat
 #   enable_passthrough: true       # IPv6: add /80 routes + restart ndppd
 #   # ipv6_prefix: "2001:db8:0:42::/80"

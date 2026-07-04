@@ -121,8 +121,11 @@ type ClientTunTAP struct {
 	Name          string   `yaml:"name"`           // default tbox0
 	Bridge        string   `yaml:"bridge"`         // optional: enslave TAP to this bridge (auto-created), put IP on it
 	BridgeMembers []string `yaml:"bridge_members"` // optional: extra local NICs to enslave to the bridge
-	IPv4CIDR      string   `yaml:"ipv4_cidr"`      // optional manual address (else server-assigned)
+	IPv4CIDR      string   `yaml:"ipv4_cidr"`      // optional manual static address (bypasses DHCP)
 	IPv6          string   `yaml:"ipv6"`           // optional manual address
+	// DHCP, when true and IPv4CIDR is empty, obtains the IPv4 address via
+	// DHCPv4 from the server's embedded DHCP server. Defaults to true.
+	DHCP *bool `yaml:"dhcp"`
 	// Routes are extra routes installed on the TAP/bridge device. Each is a CIDR,
 	// optionally "CIDR via GATEWAY" (e.g. "192.168.9.0/24 via 10.42.0.1").
 	Routes []string `yaml:"routes"`
@@ -406,6 +409,11 @@ func LoadClient(path string) (*ClientConfig, error) {
 				if _, _, err := net.ParseCIDR(c.Tun.TAP.IPv4CIDR); err != nil {
 					return nil, fmt.Errorf("tun.tap.ipv4_cidr %q: %w", c.Tun.TAP.IPv4CIDR, err)
 				}
+			}
+			// DHCP defaults to true when no static IPv4 is set.
+			if c.Tun.TAP.DHCP == nil {
+				dhcp := true
+				c.Tun.TAP.DHCP = &dhcp
 			}
 			if len(c.Tun.TAP.BridgeMembers) > 0 && c.Tun.TAP.Bridge == "" {
 				return nil, fmt.Errorf("tun.tap.bridge_members requires tun.tap.bridge")

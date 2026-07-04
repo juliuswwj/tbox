@@ -114,11 +114,7 @@ func (s *Server) handleSession(conn net.Conn) {
 			}
 			s.logger.Printf("control: client %s registered %d cert(s), services: %s",
 				shortID(clientID), len(msg.Certs), strings.Join(ids, ", "))
-			resp := ack(true, "")
-			if s.hub != nil {
-				resp.Tun = s.hub.Assign(clientID)
-			}
-			_ = enc.Encode(resp)
+			_ = enc.Encode(ack(true, ""))
 
 		case TypeUpdateWhitelist:
 			if err := s.reg.UpdateWhitelist(clientID, msg.ServiceID, msg.Allow); err != nil {

@@ -38,22 +38,6 @@ type Message struct {
 	// ack
 	OK    bool   `json:"ok,omitempty"`
 	Error string `json:"error,omitempty"`
-
-	// tun: returned by the server in the register ack when the L2 tunnel hub is
-	// enabled, assigning this client a virtual address for native-TAP mode.
-	Tun *TunAssignment `json:"tun,omitempty"`
-}
-
-// TunAssignment is the server-assigned virtual-network configuration for a
-// client's native TAP interface. External udpt.py clients self-configure
-// (via --ip) and do not use this.
-type TunAssignment struct {
-	IPv4CIDR     string `json:"ipv4_cidr,omitempty"`      // e.g. 10.42.0.7/24
-	Gateway      string `json:"gateway,omitempty"`        // e.g. 10.42.0.1
-	MTU          int    `json:"mtu,omitempty"`            // e.g. 1448
-	SubnetRoute  string `json:"subnet_route,omitempty"`   // e.g. 10.42.0.0/24
-	DefaultRoute bool   `json:"default_route,omitempty"`  // server offers global egress
-	ServerRealIP string `json:"server_real_ip,omitempty"` // host-route exception for the carrier
 }
 
 // CertReg is a TLS certificate a client uploads. The covered names are read
