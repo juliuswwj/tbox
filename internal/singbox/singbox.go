@@ -110,6 +110,10 @@ type outbound struct {
 	UUID       string       `json:"uuid,omitempty"`
 	Flow       string       `json:"flow,omitempty"`
 	TLS        *outboundTLS `json:"tls,omitempty"`
+	// TCPFastOpen makes the DialerOptions non-zero so sing-box does not reject
+	// the direct outbound as "empty" when used as a DNS detour. Harmless for
+	// UDP DNS queries, keeps IsEmpty() == false.
+	TCPFastOpen bool `json:"tcp_fast_open,omitempty"`
 }
 
 type routeOpts struct {
@@ -218,6 +222,157 @@ func ClientConfigJSON(p ClientParams) ([]byte, error) {
 		Route: &routeOpts{Final: "vless-out"},
 	}
 	return json.Marshal(cfg)
+}
+
+// --- tun (Android VpnService) client config ---
+//
+// The Android client runs the same VLESS-REALITY outbound as the desktop
+// client, but fronts it with a sing-box "tun" inbound instead of a local
+// SOCKS listener so it can capture all device traffic. sing-box's libbox
+// runtime turns the tun inbound into a VpnService callback (OpenTun) and honors
+// route.auto_detect_interface to protect the underlying carrier socket, so the
+// connection to the server does not loop back through the tunnel.
+
+type dnsServer struct {
+	Type       string `json:"type"`
+	Tag        string `json:"tag"`
+	Server     string `json:"server,omitempty"`
+	ServerPort uint16 `json:"server_port,omitempty"`
+	Detour     string `json:"detour,omitempty"`
+}
+
+type dnsOpts struct {
+	Servers []dnsServer `json:"servers"`
+	Final   string      `json:"final,omitempty"`
+}
+
+type domainResolver struct {
+	Server string `json:"server"`
+}
+
+type tunInbound struct {
+	Type        string   `json:"type"`
+	Tag         string   `json:"tag,omitempty"`
+	Address     []string `json:"address,omitempty"`
+	MTU         uint32   `json:"mtu,omitempty"`
+	AutoRoute   bool     `json:"auto_route"`
+	StrictRoute bool     `json:"strict_route"`
+	Stack       string   `json:"stack,omitempty"`
+}
+
+type routeRule struct {
+	Action   string `json:"action,omitempty"`
+	Protocol string `json:"protocol,omitempty"`
+}
+
+type tunRouteOpts struct {
+	Rules                 []routeRule     `json:"rules,omitempty"`
+	AutoDetectInterface   bool            `json:"auto_detect_interface"`
+	OverrideAndroidVPN    bool            `json:"override_android_vpn,omitempty"`
+	DefaultDomainResolver *domainResolver `json:"default_domain_resolver,omitempty"`
+	Final                 string          `json:"final,omitempty"`
+}
+
+type tunConfig struct {
+	Log       *logOpts      `json:"log,omitempty"`
+	DNS       *dnsOpts      `json:"dns,omitempty"`
+	Inbounds  []tunInbound  `json:"inbounds,omitempty"`
+	Outbounds []outbound    `json:"outbounds,omitempty"`
+	Route     *tunRouteOpts `json:"route,omitempty"`
+}
+
+// TunClientParams configures the Android tun client. The REALITY fields mirror
+// ClientParams; the tun fields describe the virtual interface addresses.
+type TunClientParams struct {
+	ServerAddr  string // VPS host
+	ServerPort  uint16 // VPS port (443)
+	UUID        string
+	SNI         string // REALITY server_name (mimic host)
+	PublicKey   string // REALITY public key (base64url)
+	ShortID     string // REALITY short id (hex)
+	Fingerprint string // utls fingerprint, default chrome
+	LogLevel    string
+
+	MTU        uint32 // tun MTU, default 9000
+	IPv6       bool   // include an IPv6 tun address / route
+	DNSAddress string // upstream DNS resolved through the tunnel, default 8.8.8.8
+}
+
+const (
+	tunInet4Address = "198.18.0.1/15"
+	tunInet6Address = "fdfe:dcba:9876::1/126"
+)
+
+// TunAddress returns the IPv4 TUN address (without mask).
+func TunAddress() string {
+	return tunInet4Address
+}
+
+// TunClientConfigJSON renders the Android tun client sing-box config as JSON.
+func TunClientConfigJSON(p TunClientParams) ([]byte, error) {
+	if p.ServerAddr == "" || p.UUID == "" || p.PublicKey == "" {
+		return nil, fmt.Errorf("tun client: server address, uuid and public key are required")
+	}
+	addrs := []string{tunInet4Address}
+	if p.IPv6 {
+		addrs = append(addrs, tunInet6Address)
+	}
+	cfg := tunConfig{
+		Log: &logOpts{Level: orDefault(p.LogLevel, "info")},
+		// remote-dns answers hijacked app queries through the tunnel as UDP;
+		// direct-dns resolves the carrier server's own domain over the underlying
+		// network (via route.default_domain_resolver) so the tunnel can be
+		// established without looping DNS back through itself.
+		DNS: &dnsOpts{
+			Servers: []dnsServer{
+				{Type: "udp", Tag: "remote-dns", Server: orDefault(p.DNSAddress, "8.8.8.8"), Detour: "vless-out"},
+				{Type: "udp", Tag: "direct-dns", Server: "223.5.5.5", Detour: "direct"},
+			},
+			Final: "remote-dns",
+		},
+		Inbounds: []tunInbound{{
+			Type:        "tun",
+			Tag:         "tun-in",
+			Address:     addrs,
+			MTU:         orDefaultUint32(p.MTU, 9000),
+			AutoRoute:   true,
+			StrictRoute: true,
+			Stack:       "system",
+		}},
+		Outbounds: []outbound{
+			{
+				Type:       "vless",
+				Tag:        "vless-out",
+				Server:     p.ServerAddr,
+				ServerPort: p.ServerPort,
+				UUID:       p.UUID,
+				TLS: &outboundTLS{
+					Enabled:    true,
+					ServerName: p.SNI,
+					UTLS:       &utlsOpts{Enabled: true, Fingerprint: orDefault(p.Fingerprint, "chrome")},
+					Reality:    &outboundReality{Enabled: true, PublicKey: p.PublicKey, ShortID: p.ShortID},
+				},
+			},
+			{Type: "direct", Tag: "direct", TCPFastOpen: true},
+		},
+		Route: &tunRouteOpts{
+			Rules: []routeRule{
+				{Action: "sniff"},
+				{Protocol: "dns", Action: "hijack-dns"},
+			},
+			AutoDetectInterface:   true,
+			DefaultDomainResolver: &domainResolver{Server: "direct-dns"},
+			Final:                 "vless-out",
+		},
+	}
+	return json.Marshal(cfg)
+}
+
+func orDefaultUint32(v, d uint32) uint32 {
+	if v == 0 {
+		return d
+	}
+	return v
 }
 
 func orDefault(v, d string) string {

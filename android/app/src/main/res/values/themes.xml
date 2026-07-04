@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.Tbox" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/tbox_blue</item>
+    </style>
+</resources>

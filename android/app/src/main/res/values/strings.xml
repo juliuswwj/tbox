@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">tbox</string>
+    <string name="token_hint">Paste your tbox:// token</string>
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="status_idle">Not connected</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="status_connected">Connected</string>
+    <string name="notif_channel">tbox VPN</string>
+    <string name="notif_title">tbox connected</string>
+</resources>
