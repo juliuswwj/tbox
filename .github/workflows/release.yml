@@ -95,15 +95,16 @@ jobs:
         run: echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.1.12297006" >> "$GITHUB_ENV"
 
       - name: Install gomobile toolchain
-        # The go.mod already carries a `tool golang.org/x/mobile/cmd/gobind`
-        # directive, so we just install the gomobile/gobind binaries above —
-        # `go install` picks the version pinned by the tool line automatically.
         run: |
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
+          go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20260611195102-4dd8f1dbf5d2
+          go install golang.org/x/mobile/cmd/gobind@v0.0.0-20260611195102-4dd8f1dbf5d2
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          gomobile init
 
       - name: Build AAR (gomobile bind)
-        run: make android
+        run: |
+          chmod +x android/gradlew
+          make android
 
       - name: Build debug APK (gradlew assembleDebug)
         run: make android-apk
