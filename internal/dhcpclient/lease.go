@@ -4,7 +4,7 @@
 // enabled and no static ipv4_cidr is set — the alternative to the legacy
 // in-protocol TunAssignment scheme.
 //
-//go:build !android
+//go:build linux
 
 package dhcpclient
 
