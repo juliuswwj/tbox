@@ -92,7 +92,11 @@ class TboxVpnService : VpnService() {
             }
         }
 
-        runCatching { builder.addDnsServer(options.getDNSServerAddress().getValue()) }
+        // Tell Android to use the TUN address as DNS — sing-box's hijack-dns
+		// rule intercepts UDP/53 on this address and resolves through its
+		// configured upstream (8.8.8.8 via vless-out).
+		val dnsAddr = tunIp.substringBefore("/")
+		builder.addDnsServer(dnsAddr)
 
         // Never route our own traffic; the carrier socket is protected anyway.
         runCatching { builder.addDisallowedApplication(packageName) }
