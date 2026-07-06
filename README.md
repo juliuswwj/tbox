@@ -158,32 +158,95 @@ thin `VpnService` + UI that implements sing-box's `PlatformInterface` (its
 `VpnService.protect`, which keeps the carrier socket to the server off the
 tunnel).
 
-Prerequisites: a Go toolchain, the Android SDK **and NDK**, and
-`ANDROID_HOME`/`ANDROID_NDK_HOME` exported. The repo includes a Gradle wrapper,
-so you do not need a system Gradle.
+### Prerequisites
+
+- Go ≥ 1.24.7
+- JDK 17+
+- Android SDK (platforms;android-34, build-tools 34.0.0)
+- Android NDK r28+ (`ANDROID_NDK_HOME`)
+- `ANDROID_HOME` pointing to the SDK root (contains `platforms/` and `build-tools/`)
+
+The repo includes a Gradle wrapper, so a system Gradle is not needed.
+
+Setup example (Ubuntu/Debian):
 
 ```sh
-# one-time: install the gomobile toolchain
+# Install system packages
+sudo apt-get install -y golang-go google-android-platform-tools-installer
+# The NDK can be installed via apt (google-android-ndk-r28c-installer) or
+# extracted from https://developer.android.com/ndk/downloads.
+
+# Set the Android SDK root (local.properties defaults to /opt/tools).
+export ANDROID_HOME=/opt/tools
+export ANDROID_NDK_HOME=/usr/lib/android-sdk/ndk/28.2.13676358
+```
+
+If the SDK directory is empty, download the platform and build-tools:
+
+```sh
+mkdir -p $ANDROID_HOME/platforms $ANDROID_HOME/build-tools
+# platform-34 (android.jar for compileSdk 34)
+curl -L -o /tmp/platform.zip https://dl.google.com/android/repository/platform-34-ext7_r03.zip
+unzip -o /tmp/platform.zip -d $ANDROID_HOME/platforms/
+# build-tools 34.0.0 (aapt, dx, apksigner, etc.)
+curl -L -o /tmp/bt.zip https://dl.google.com/android/repository/build-tools_r34-linux.zip
+unzip -o /tmp/bt.zip -d /tmp/bt/ && mv /tmp/bt/* $ANDROID_HOME/build-tools/34.0.0/
+```
+
+### Build
+
+```sh
+# one-time: install the gomobile toolchain (needs Android NDK)
 make android-tools
 
-# build the native AAR (bundles ./mobile + sing-box libbox, with_utls tag)
+# build the Go AAR (bundles ./mobile + sing-box libbox, with_utls + with_clash_api tags)
 make android
 
-# build the APK in one shot (AAR + gradlew assembleDebug)
+# assemble the debug APK
 make android-apk
 adb install android/app/build/outputs/apk/debug/app-debug.apk
 ```
+
+The `with_clash_api` build tag enables clash-compatible selectors used by
+sing-box on Android.
+
+### Architecture & API
+
+The Go-side entry point is the `mobile` package, bound to an AAR via
+`gomobile bind`. It exposes:
+
+| Function | Description |
+|---|---|
+| `ParseToken(tokenStr)` | Decodes a `tbox://` token, returns `TokenInfo` for UI display |
+| `TokenSummary(tokenStr)` | Returns a human-readable server description |
+| `BuildConfig(tokenStr, opts)` | Renders the full sing-box tun config as JSON |
+| `Start(tokenStr, opts, platform)` | Starts sing-box via libbox and returns a `Service` |
+| `Service.Close()` | Stops sing-box and tears down the tun |
+
+The `Options` struct tunes the tun client: log level, MTU, IPv6, custom DNS,
+and libbox filesystem paths for `BasePath`/`WorkingPath`/`TempPath`.
+
+### Device flow
+
+1. User pastes the `tbox://` token (the same one `tbox add-client` prints).
+2. The app calls `ParseToken` to display the server address and SNI for
+   confirmation.
+3. On **Connect**, the app calls `Start` which:
+   - Optionally calls `libbox.Setup` to initialise the Go runtime.
+   - Builds the sing-box config via `TunClientConfigJSON` using the token's
+     REALITY fields.
+   - Creates a `libbox.BoxService` with the app's `PlatformInterface` (the
+     `VpnService` implementation that builds the TUN fd and provides
+     `VpnService.protect` for the carrier socket).
+4. Sing-box routes all device traffic through the tunnel. DNS is hijacked
+   and resolved via the tunnel; the server's own address is resolved directly
+   through `default_domain_resolver` so the tunnel can come up.
 
 Releases: every `v*` tag pushes both desktop binaries (per-OS/arch archives) and
 the Android APK to the GitHub release — see
 [`.github/workflows/release.yml`](.github/workflows/release.yml). The Android
 job sets up Go, JDK 17, the Android SDK + NDK, runs `make android` then
 `make android-apk`, and uploads `tbox_<version>_android.apk`.
-
-Then open the app, paste the `tbox://` token (the same one `tbox add-client`
-prints), and tap **Connect**. By default it routes everything (`0.0.0.0/0`) with
-DNS through the tunnel; the carrier server's own address is resolved directly so
-the tunnel can come up.
 
 ## L2 tunnel (TAP)
 
