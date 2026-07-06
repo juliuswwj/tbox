@@ -101,7 +101,7 @@ func TestTunClientConfigCustomMTU(t *testing.T) {
 
 func TestTunClientConfigCustomFingerprint(t *testing.T) {
 	raw, err := TunClientConfigJSON(TunClientParams{
-		ServerAddr:  "vps.example.com", ServerPort: 443,
+		ServerAddr: "vps.example.com", ServerPort: 443,
 		UUID:        "11111111-1111-4111-8111-111111111111",
 		SNI:         "www.microsoft.com",
 		PublicKey:   "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
