@@ -56,6 +56,7 @@ func RunClient(cfg *config.ClientConfig) error {
 		SNI:         tok.SNI,
 		LogLevel:    cfg.LogLevel,
 		Carrier:     carrier,
+		TproxyPort:  cfg.TproxyPort,
 	}
 	switch carrier {
 	case "tuic":

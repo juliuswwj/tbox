@@ -170,6 +170,8 @@ type ClientConfig struct {
 	SocksListen string `yaml:"socks_listen"`
 	AdminListen string `yaml:"admin_listen"`
 	LogLevel    string `yaml:"log_level"`
+	// TproxyPort, when > 0, enables a TPROXY inbound for transparent proxying.
+	TproxyPort uint16 `yaml:"tproxy_port,omitempty"`
 	// Certs are TLS certificates this client uploads (optional; the server may
 	// provide the cert instead).
 	Certs   []CertFile `yaml:"certs"`

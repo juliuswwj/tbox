@@ -262,6 +262,10 @@ type ClientParams struct {
 	TuicSNI          string // TUIC TLS server_name ("" => reuse SNI)
 	TuicCongestion   string
 	TuicUDPRelayMode string
+
+	// TproxyPort, when > 0, adds a TPROXY inbound on that port for transparent
+	// TCP/UDP proxying. Requires CAP_NET_ADMIN (disabled in tests).
+	TproxyPort uint16
 }
 
 // ClientConfigJSON renders the client sing-box config as JSON.
@@ -346,15 +350,18 @@ func ClientConfigJSON(p ClientParams) ([]byte, error) {
 			Tag:        "socks-in",
 			Listen:     host,
 			ListenPort: port,
-		}, {
-			Type:       "tproxy",
-			Tag:        "tproxy-in",
-			Listen:     "0.0.0.0",
-			ListenPort: 12345,
-			Network:    []string{"tcp", "udp"},
 		}},
 		Outbounds: []outbound{ob, {Type: "direct", Tag: "direct"}},
 		Route:     &routeOpts{Final: outTag},
+	}
+	if p.TproxyPort > 0 {
+		cfg.Inbounds = append(cfg.Inbounds, inbound{
+			Type:       "tproxy",
+			Tag:        "tproxy-in",
+			Listen:     "0.0.0.0",
+			ListenPort: p.TproxyPort,
+			Network:    []string{"tcp", "udp"},
+		})
 	}
 	//$XBH_AI_PATCH_END
 	return json.Marshal(cfg)
