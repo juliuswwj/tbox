@@ -1,6 +1,9 @@
 # tbox client (runs on the local machine behind the monitored gateway).
 
-# Token from `tbox add-client` / `tbox gen-token` on the server.
+# Token from `tbox add-client` / `tbox gen-token` on the server. The token also
+# selects the carrier: default is REALITY; `tbox gen-token --carrier tuic` mints
+# a TUIC v5 token (requires the server's `tuic:` block). Nothing else here
+# changes between carriers — the token carries the choice.
 token: "tbox://REPLACE_ME"
 
 # Local SOCKS5H (also SOCKS4/HTTP via the mixed inbound) for forward proxying.

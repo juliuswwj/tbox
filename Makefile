@@ -7,7 +7,9 @@ GO ?= go
 #$XBH_AI_PATCH_START
 #TAGS := with_utls
 #$XBH_AI_PATCH_MODIFY
-TAGS := with_utls with_clash_api
+#TAGS := with_utls with_clash_api
+#$XBH_AI_PATCH_MODIFY
+TAGS := with_utls with_clash_api with_quic
 #$XBH_AI_PATCH_END
 BIN := bin/tbox
 

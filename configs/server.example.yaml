@@ -92,3 +92,15 @@ clients:
 #   ban_duration: "1h"
 #   subnet_threshold: 2        # distinct banned IPs in a /24 -> ban the /24 (0=off)
 #   exempt: ["203.0.113.0/24"] # sources never counted or banned
+
+# OPTIONAL: TUIC v5 carrier inbound (QUIC/UDP). Independent of the REALITY
+# TCP:443 path — runs alongside it so some clients may use TUIC while others use
+# REALITY. TUIC uses real TLS (never REALITY): `sni` must be covered by a cert
+# listed in `certs:` above. Each client authenticates with its UUID plus the
+# `tuic_password` under `clients:` (empty falls back to the UUID). Remember to
+# open this UDP port in your firewall / security group.
+# tuic:
+#   enable: true
+#   listen: ":443"                 # UDP port
+#   sni: "tuic.example.com"        # must match a cert SAN in certs:
+#   # congestion_control: "cubic"  # cubic (default) | new_reno | bbr

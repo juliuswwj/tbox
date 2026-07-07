@@ -23,6 +23,17 @@ type Token struct {
 	SNI         string `json:"sni"`          // REALITY server_name (mimic host)
 	ControlAddr string `json:"control_addr"` // server-side control listener (e.g. 127.0.0.1:8443)
 	Flow        string `json:"flow,omitempty"`
+
+	// TUIC carrier fields. Optional; populated only when the token selects the
+	// TUIC v5 carrier (see Carrier). A token may carry reality fields, TUIC
+	// fields, or both; Carrier() decides which outbound the client renders.
+	// All fields are omitempty so legacy reality tokens decode unchanged.
+	TuicPort         uint16 `json:"tuic_port,omitempty"`           // TUIC server UDP port
+	TuicPassword     string `json:"tuic_password,omitempty"`       // TUIC user password
+	TuicSNI          string `json:"tuic_sni,omitempty"`            // TUIC TLS server_name
+	TuicCongestion   string `json:"tuic_congestion,omitempty"`     // cubic|new_reno|bbr
+	TuicUDPRelayMode string `json:"tuic_udp_relay_mode,omitempty"` // native|quic
+	Protocol         string `json:"protocol,omitempty"`            // "" / "reality" / "tuic"
 }
 
 // Encode renders a token as a base64url string with a "tbox://" scheme prefix.
@@ -48,10 +59,44 @@ func Decode(s string) (Token, error) {
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return Token{}, fmt.Errorf("parse token: %w", err)
 	}
-	if t.UUID == "" || t.ServerAddr == "" || t.PublicKey == "" {
+	//$XBH_AI_PATCH_START
+	//if t.UUID == "" || t.ServerAddr == "" || t.PublicKey == "" {
+	//	return Token{}, fmt.Errorf("token missing required fields")
+	//}
+	//$XBH_AI_PATCH_MODIFY
+	// UUID and ServerAddr are required for either carrier; the carrier-specific
+	// credential (reality public_key or TUIC password) is validated per Carrier().
+	if t.UUID == "" || t.ServerAddr == "" {
 		return Token{}, fmt.Errorf("token missing required fields")
 	}
+	switch t.Carrier() {
+	case "tuic":
+		if t.TuicPassword == "" {
+			return Token{}, fmt.Errorf("tuic token missing tuic_password")
+		}
+	default:
+		if t.PublicKey == "" {
+			return Token{}, fmt.Errorf("reality token missing public_key")
+		}
+	}
+	//$XBH_AI_PATCH_END
 	return t, nil
+}
+
+// Carrier returns the transport this token selects.
+//
+// "tuic" when Protocol=="tuic", or when the token carries TUIC credentials
+// only (tuic_password set, no reality public_key) and does not explicitly
+// request reality. "reality" otherwise — the historical default, which keeps
+// tokens minted before TUIC was introduced working unchanged.
+func (t Token) Carrier() string {
+	if t.Protocol == "tuic" {
+		return "tuic"
+	}
+	if t.Protocol == "" && t.TuicPassword != "" && t.PublicKey == "" {
+		return "tuic"
+	}
+	return "reality"
 }
 
 // Keypair is a REALITY X25519 keypair, base64url-encoded.

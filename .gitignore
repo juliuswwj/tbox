@@ -1,6 +1,7 @@
 # build output
 /bin/
 /dist/
+/tbox
 
 # local configs / secrets (ship only the *.example.yaml)
 /etc/

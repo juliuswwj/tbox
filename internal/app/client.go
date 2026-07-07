@@ -33,16 +33,43 @@ func RunClient(cfg *config.ClientConfig) error {
 		return fmt.Errorf("token missing control_addr; regenerate it with this tbox version")
 	}
 
-	raw, err := singbox.ClientConfigJSON(singbox.ClientParams{
+	//$XBH_AI_PATCH_START
+	//	raw, err := singbox.ClientConfigJSON(singbox.ClientParams{
+	//		SocksListen: cfg.SocksListen,
+	//		ServerAddr:  tok.ServerAddr,
+	//		ServerPort:  tok.ServerPort,
+	//		UUID:        tok.UUID,
+	//		SNI:         tok.SNI,
+	//		PublicKey:   tok.PublicKey,
+	//		ShortID:     tok.ShortID,
+	//		LogLevel:    cfg.LogLevel,
+	//	})
+	//$XBH_AI_PATCH_MODIFY
+	// Pick the carrier the token selects and fill only that carrier's credential
+	// set; the other stays zero so sing-box renders a single outbound.
+	carrier := tok.Carrier()
+	cp := singbox.ClientParams{
 		SocksListen: cfg.SocksListen,
 		ServerAddr:  tok.ServerAddr,
 		ServerPort:  tok.ServerPort,
 		UUID:        tok.UUID,
 		SNI:         tok.SNI,
-		PublicKey:   tok.PublicKey,
-		ShortID:     tok.ShortID,
 		LogLevel:    cfg.LogLevel,
-	})
+		Carrier:     carrier,
+	}
+	switch carrier {
+	case "tuic":
+		cp.TuicPort = tok.TuicPort
+		cp.TuicPassword = tok.TuicPassword
+		cp.TuicSNI = tok.TuicSNI
+		cp.TuicCongestion = tok.TuicCongestion
+		cp.TuicUDPRelayMode = tok.TuicUDPRelayMode
+	default:
+		cp.PublicKey = tok.PublicKey
+		cp.ShortID = tok.ShortID
+	}
+	raw, err := singbox.ClientConfigJSON(cp)
+	//$XBH_AI_PATCH_END
 	if err != nil {
 		return fmt.Errorf("build sing-box config: %w", err)
 	}

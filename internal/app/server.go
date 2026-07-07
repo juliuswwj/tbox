@@ -39,6 +39,55 @@ func RunServer(cfg *config.ServerConfig) error {
 		clientMap[c.UUID] = c.Name
 	}
 
+	// Optional TUIC v5 inbound (independent UDP port, real TLS cert from Certs).
+	// Built only when enabled; nil leaves the server REALITY-only, as before.
+	var tuic *singbox.TuicServerParams
+	if cfg.Tuic.Enable {
+		cf, ok := config.FindCertForSAN(cfg.Certs, cfg.Tuic.SNI)
+		if !ok {
+			return fmt.Errorf("tuic: no cert covers SNI %q", cfg.Tuic.SNI)
+		}
+		tuicUsers := make([]singbox.User, 0, len(cfg.Clients))
+		for _, c := range cfg.Clients {
+			pw := c.TuicPassword
+			if pw == "" {
+				pw = c.UUID // backward-compatible default: UUID as TUIC password
+			}
+			tuicUsers = append(tuicUsers, singbox.User{Name: c.Name, UUID: c.UUID, Password: pw})
+		}
+		tuicHost, tuicPortStr, err := net.SplitHostPort(cfg.Tuic.Listen)
+		if err != nil {
+			return fmt.Errorf("tuic.listen: %w", err)
+		}
+		tuicPort64, err := strconv.ParseUint(tuicPortStr, 10, 16)
+		if err != nil {
+			return fmt.Errorf("tuic.listen: invalid port %q: %w", tuicPortStr, err)
+		}
+		if tuicHost == "" {
+			tuicHost = "0.0.0.0"
+		}
+		tuic = &singbox.TuicServerParams{
+			Listen:            tuicHost,
+			ListenPort:        uint16(tuicPort64),
+			SNI:               cfg.Tuic.SNI,
+			CertPath:          cf.CertPath,
+			KeyPath:           cf.KeyPath,
+			CongestionControl: cfg.Tuic.CongestionControl,
+			Users:             tuicUsers,
+		}
+	}
+	//$XBH_AI_PATCH_START
+	//	raw, err := singbox.ServerConfigJSON(singbox.ServerParams{
+	//		ListenAddr: rHost,
+	//		ListenPort: rPort,
+	//		MimicHost:  cfg.MimicHost(),
+	//		MimicPort:  cfg.MimicPort(),
+	//		PrivateKey: cfg.RealityPrivateKey,
+	//		ShortID:    cfg.ShortID,
+	//		Users:      users,
+	//		LogLevel:   cfg.LogLevel,
+	//	})
+	//$XBH_AI_PATCH_MODIFY
 	raw, err := singbox.ServerConfigJSON(singbox.ServerParams{
 		ListenAddr: rHost,
 		ListenPort: rPort,
@@ -48,7 +97,9 @@ func RunServer(cfg *config.ServerConfig) error {
 		ShortID:    cfg.ShortID,
 		Users:      users,
 		LogLevel:   cfg.LogLevel,
+		Tuic:       tuic,
 	})
+	//$XBH_AI_PATCH_END
 	if err != nil {
 		return fmt.Errorf("build sing-box config: %w", err)
 	}

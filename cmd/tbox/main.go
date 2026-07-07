@@ -66,7 +66,7 @@ Usage:
   tbox add-client  -c server.yaml <name>
   tbox server      -c server.yaml
   tbox client      -c client.yaml
-  tbox gen-token   -c server.yaml [--client <name>]   # re-print token(s) for existing client(s)
+  tbox gen-token   -c server.yaml [--client <name>] [--carrier reality|tuic]   # re-print token(s)
   tbox gen-keypair                                    # low-level: just print keys
   tbox whitelist   -c client.yaml show
   tbox whitelist   -c client.yaml set    <service-url> <cidr>...
@@ -185,18 +185,63 @@ func cmdAddClient(args []string) error {
 	return nil
 }
 
+// $XBH_AI_PATCH_START
+//
+//	func cmdGenToken(args []string) error {
+//		var cfgPath, clientName string
+//		for i := 0; i < len(args); i++ {
+//			switch args[i] {
+//			case "-c", "--config":
+//				cfgPath, i = nextArg(args, i)
+//			case "--client":
+//				clientName, i = nextArg(args, i)
+//			}
+//		}
+//		if cfgPath == "" {
+//			return fmt.Errorf("-c server.yaml is required")
+//		}
+//		cfg, err := config.LoadServer(cfgPath)
+//		if err != nil {
+//			return err
+//		}
+//		names := []string{clientName}
+//		if clientName == "" {
+//			names = names[:0]
+//			for _, c := range cfg.Clients {
+//				names = append(names, c.Name)
+//			}
+//		}
+//		for _, n := range names {
+//			tok, err := app.TokenFor(cfg, n)
+//			if err != nil {
+//				return err
+//			}
+//			fmt.Printf("# token for client %q:\n%s\n", n, tok)
+//		}
+//		return nil
+//	}
+//
+// $XBH_AI_PATCH_MODIFY
 func cmdGenToken(args []string) error {
-	var cfgPath, clientName string
+	var cfgPath, clientName, carrier string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-c", "--config":
 			cfgPath, i = nextArg(args, i)
 		case "--client":
 			clientName, i = nextArg(args, i)
+		case "--carrier":
+			carrier, i = nextArg(args, i)
 		}
 	}
 	if cfgPath == "" {
 		return fmt.Errorf("-c server.yaml is required")
+	}
+	if carrier == "" {
+		carrier = "reality"
+	}
+	if carrier != "reality" && carrier != "tuic" {
+		return fmt.Errorf("--carrier must be reality or tuic, got %q", carrier)
 	}
 	cfg, err := config.LoadServer(cfgPath)
 	if err != nil {
@@ -210,14 +255,16 @@ func cmdGenToken(args []string) error {
 		}
 	}
 	for _, n := range names {
-		tok, err := app.TokenFor(cfg, n)
+		tok, err := app.TokenFor(cfg, n, carrier)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("# token for client %q:\n%s\n", n, tok)
+		fmt.Printf("# token for client %q (carrier %s):\n%s\n", n, carrier, tok)
 	}
 	return nil
 }
+
+//$XBH_AI_PATCH_END
 
 // nextArg returns the value following a flag at index i, and the advanced index.
 func nextArg(args []string, i int) (string, int) {

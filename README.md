@@ -98,10 +98,11 @@ make build        # -> bin/tbox
 make test         # unit + integration (a full REALITY tunnel against a local mimic; no network)
 ```
 
-Or install directly (the `with_utls` tag is required for REALITY):
+Or install directly (`with_utls` for REALITY, `with_quic` for the optional TUIC
+carrier — both are already in the Makefile and release binaries):
 
 ```sh
-go install -tags with_utls github.com/juliuswwj/tbox/cmd/tbox@latest
+go install -tags 'with_utls with_quic' github.com/juliuswwj/tbox/cmd/tbox@latest
 ```
 
 Prebuilt binaries for tagged releases are published on the
@@ -141,6 +142,46 @@ tbox whitelist -c client.yaml set    tcp://ssh.dc.example.com 203.0.113.0/24
 tbox whitelist -c client.yaml add    tcp://ssh.dc.example.com 198.51.100.7/32
 tbox whitelist -c client.yaml remove tcp://ssh.dc.example.com 203.0.113.0/24
 ```
+
+## TUIC carrier (optional)
+
+By default the client→server carrier is VLESS-REALITY over TCP:443 (it looks
+like HTTPS to the mimic host). tbox can additionally offer a **TUIC v5** carrier
+— a QUIC/UDP protocol — for the SOCKS5H and Android tun clients. TUIC and
+REALITY are interchangeable **per token**: one client's token can select REALITY,
+another's TUIC, and the server runs both inbounds at once (TUIC on its own UDP
+port, orthogonal to the TCP:443 SNI router, so they never collide).
+
+To enable TUIC on the server, add a `tuic:` block to `server.yaml`. TUIC uses
+real TLS (never REALITY), so `sni` must be covered by a certificate in `certs:`:
+
+```yaml
+certs:
+  - cert_path: "/etc/tbox/tuic.example.com.crt"   # SAN must cover tuic.sni
+    key_path:  "/etc/tbox/tuic.example.com.key"
+tuic:
+  enable: true
+  listen: ":443"               # UDP port (independent of the TCP:443 SNI router)
+  sni: "tuic.example.com"      # TLS server_name; must match a cert SAN above
+  # congestion_control: "cubic"  # cubic (default) | new_reno | bbr
+```
+
+Each client authenticates to TUIC with its UUID plus the `tuic_password` under
+`clients:` (empty falls back to the UUID). Open the TUIC UDP port in your
+firewall / security group.
+
+Mint a TUIC token for a client with `--carrier tuic`; a REALITY token still
+works unchanged, so both carriers stay available:
+
+```sh
+tbox gen-token -c server.yaml --carrier tuic    --client laptop   # TUIC token
+tbox gen-token -c server.yaml --carrier reality --client laptop   # REALITY token (default)
+```
+
+Drop the chosen token into `client.yaml` (or the Android app) as usual — the
+token carries the carrier, so nothing else in the client config changes. The
+TUIC outbound needs the `with_quic` build tag (on by default in `make build` and
+the release binaries).
 
 ## Android client (VPN)
 

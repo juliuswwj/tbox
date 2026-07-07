@@ -4,6 +4,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"net/netip"
@@ -78,6 +80,19 @@ type ServerConfig struct {
 	Tun ServerTun `yaml:"tun"`
 	// Ban enables fail2ban-style throttling of the HTTP publishing path.
 	Ban ServerBan `yaml:"ban"`
+	// Tuic enables the optional TUIC v5 inbound (independent UDP port, real TLS
+	// cert from Certs). Runs alongside the REALITY TCP:443 path; off by default.
+	Tuic ServerTuic `yaml:"tuic"`
+}
+
+// ServerTuic configures the optional server-side TUIC v5 inbound. TUIC listens
+// on its own UDP port (independent of the REALITY TCP:443 path) and uses a real
+// TLS certificate (from Certs, whose SAN must cover SNI) — never REALITY.
+type ServerTuic struct {
+	Enable            bool   `yaml:"enable"`
+	Listen            string `yaml:"listen"`             // UDP, e.g. ":443" or ":8445"; default ":443"
+	SNI               string `yaml:"sni"`                // TLS server_name; must be covered by a cert in Certs
+	CongestionControl string `yaml:"congestion_control"` // cubic|new_reno|bbr; default cubic
 }
 
 // ServerBan configures fail2ban-style banning on the HTTP publishing path: it
@@ -95,10 +110,12 @@ type ServerBan struct {
 	Exempt          []string `yaml:"exempt"`           // CIDRs never counted or blocked
 }
 
-// ClientCred is a single authorized client (one VLESS user).
+// ClientCred is a single authorized client. UUID is the VLESS user id; for the
+// TUIC carrier, TuicPassword is the TUIC user password (empty falls back to UUID).
 type ClientCred struct {
-	Name string `yaml:"name"`
-	UUID string `yaml:"uuid"`
+	Name         string `yaml:"name"`
+	UUID         string `yaml:"uuid"`
+	TuicPassword string `yaml:"tuic_password,omitempty"`
 }
 
 // ServerTun configures the server-side L2 tunnel hub: a TAP device on the VPS,
@@ -284,6 +301,11 @@ func LoadServer(path string) (*ServerConfig, error) {
 			return nil, fmt.Errorf("ban: %w", err)
 		}
 	}
+	if c.Tuic.Enable {
+		if err := validateServerTuic(&c.Tuic, c.Certs); err != nil {
+			return nil, fmt.Errorf("tuic: %w", err)
+		}
+	}
 	return &c, nil
 }
 
@@ -320,6 +342,93 @@ func validateServerBan(b *ServerBan) error {
 		}
 	}
 	return nil
+}
+
+// validateServerTuic fills defaults and verifies the TUIC inbound can get a TLS
+// certificate whose SAN covers the configured SNI. TUIC requires a real cert
+// (never REALITY), so at least one Certs entry must cover SNI.
+func validateServerTuic(t *ServerTuic, certs []CertFile) error {
+	if t.SNI == "" {
+		return fmt.Errorf("sni is required")
+	}
+	if t.Listen == "" {
+		t.Listen = ":443"
+	}
+	if t.CongestionControl == "" {
+		t.CongestionControl = "cubic"
+	}
+	if len(certs) == 0 {
+		return fmt.Errorf("at least one cert is required in certs (SNI %q must be covered)", t.SNI)
+	}
+	for _, cf := range certs {
+		names, err := certDNSNames(cf.CertPath)
+		if err != nil {
+			return fmt.Errorf("read cert %s: %w", cf.CertPath, err)
+		}
+		if coversName(names, t.SNI) {
+			return nil
+		}
+	}
+	return fmt.Errorf("no cert in certs covers SNI %q", t.SNI)
+}
+
+// certDNSNames returns the DNS SAN names of a PEM certificate, falling back to
+// the Subject CommonName when there are no SANs.
+func certDNSNames(certPath string) ([]string, error) {
+	pemData, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(pemData)
+	if block == nil {
+		return nil, fmt.Errorf("no PEM block in %s", certPath)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	names := append([]string(nil), cert.DNSNames...)
+	if len(names) == 0 && cert.Subject.CommonName != "" {
+		names = []string{cert.Subject.CommonName}
+	}
+	return names, nil
+}
+
+// coversName reports whether any of names matches host, exactly or via wildcard
+// (e.g. "*.example.com").
+func coversName(names []string, host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	for _, n := range names {
+		n = strings.ToLower(n)
+		if n == host {
+			return true
+		}
+		if strings.HasPrefix(n, "*.") {
+			suffix := n[1:] // ".example.com"
+			if strings.HasSuffix(host, suffix) {
+				label := host[:len(host)-len(suffix)]
+				if label != "" && !strings.Contains(label, ".") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// FindCertForSAN returns the first CertFile whose certificate SAN covers sni.
+// Call after validateServerTuic has confirmed one exists.
+func FindCertForSAN(certs []CertFile, sni string) (CertFile, bool) {
+	for _, cf := range certs {
+		names, err := certDNSNames(cf.CertPath)
+		if err != nil {
+			continue
+		}
+		if coversName(names, sni) {
+			return cf, true
+		}
+	}
+	return CertFile{}, false
 }
 
 // validateServerTun fills defaults and validates the server tun block.

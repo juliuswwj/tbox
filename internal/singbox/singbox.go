@@ -75,22 +75,29 @@ type utlsOpts struct {
 }
 
 type inboundTLS struct {
-	Enabled    bool            `json:"enabled"`
-	ServerName string          `json:"server_name,omitempty"`
-	Reality    *inboundReality `json:"reality,omitempty"`
+	Enabled         bool            `json:"enabled"`
+	ServerName      string          `json:"server_name,omitempty"`
+	Insecure        bool            `json:"insecure,omitempty"`
+	ALPN            []string        `json:"alpn,omitempty"`
+	CertificatePath string          `json:"certificate_path,omitempty"`
+	KeyPath         string          `json:"key_path,omitempty"`
+	Reality         *inboundReality `json:"reality,omitempty"`
 }
 
 type outboundTLS struct {
 	Enabled    bool             `json:"enabled"`
 	ServerName string           `json:"server_name,omitempty"`
+	Insecure   bool             `json:"insecure,omitempty"`
+	ALPN       []string         `json:"alpn,omitempty"`
 	UTLS       *utlsOpts        `json:"utls,omitempty"`
 	Reality    *outboundReality `json:"reality,omitempty"`
 }
 
 type vlessUser struct {
-	Name string `json:"name,omitempty"`
-	UUID string `json:"uuid"`
-	Flow string `json:"flow,omitempty"`
+	Name     string `json:"name,omitempty"`
+	UUID     string `json:"uuid"`
+	Flow     string `json:"flow,omitempty"`
+	Password string `json:"password,omitempty"` // TUIC user password (ignored by VLESS)
 }
 
 type inbound struct {
@@ -100,6 +107,10 @@ type inbound struct {
 	ListenPort uint16      `json:"listen_port,omitempty"`
 	Users      []vlessUser `json:"users,omitempty"`
 	TLS        *inboundTLS `json:"tls,omitempty"`
+	// TUIC inbound fields (used when Type == "tuic"; ignored otherwise).
+	CongestionControl string `json:"congestion_control,omitempty"`
+	AuthTimeout       string `json:"auth_timeout,omitempty"`
+	Heartbeat         string `json:"heartbeat,omitempty"`
 }
 
 type outbound struct {
@@ -110,6 +121,12 @@ type outbound struct {
 	UUID       string       `json:"uuid,omitempty"`
 	Flow       string       `json:"flow,omitempty"`
 	TLS        *outboundTLS `json:"tls,omitempty"`
+	// TUIC outbound fields (used when Type == "tuic"; ignored otherwise).
+	Password          string `json:"password,omitempty"`
+	CongestionControl string `json:"congestion_control,omitempty"`
+	UDPRelayMode      string `json:"udp_relay_mode,omitempty"`
+	ZeroRTTHandshake  bool   `json:"zero_rtt_handshake,omitempty"`
+	Heartbeat         string `json:"heartbeat,omitempty"`
 	// TCPFastOpen makes the DialerOptions non-zero so sing-box does not reject
 	// the direct outbound as "empty" when used as a DNS detour. Harmless for
 	// UDP DNS queries, keeps IsEmpty() == false.
@@ -127,7 +144,21 @@ type config struct {
 	Route     *routeOpts `json:"route,omitempty"`
 }
 
-// ServerParams configures the server-side sing-box (VLESS-REALITY inbound).
+// TuicServerParams configures the optional server-side TUIC v5 inbound. It runs
+// alongside the VLESS-REALITY inbound on an independent UDP port. TUIC uses real
+// TLS (a certificate whose SAN covers SNI), never REALITY.
+type TuicServerParams struct {
+	Listen            string // UDP listen host (e.g. 0.0.0.0)
+	ListenPort        uint16 // UDP listen port
+	SNI               string // TLS server_name; must be covered by the cert
+	CertPath          string // server certificate file path
+	KeyPath           string // server key file path
+	CongestionControl string // cubic|new_reno|bbr (default cubic)
+	Users             []User // TUIC users (UUID + Password)
+}
+
+// ServerParams configures the server-side sing-box (VLESS-REALITY inbound, plus
+// an optional TUIC v5 inbound when Tuic is non-nil).
 type ServerParams struct {
 	ListenAddr string // host the reality inbound binds (e.g. 127.0.0.1)
 	ListenPort uint16 // reality inbound port (behind the L4 SNI router)
@@ -137,19 +168,28 @@ type ServerParams struct {
 	ShortID    string // REALITY short id
 	Users      []User // allowed clients
 	LogLevel   string
+	// Tuic optionally enables a TUIC v5 inbound alongside REALITY. nil = off.
+	Tuic *TuicServerParams
 }
 
-// User is a VLESS user (one per tbox client).
+// User is a proxy user (one per tbox client). For REALITY only UUID is used; for
+// TUIC the Password is the per-user TUIC password (empty falls back to UUID at
+// the call site).
 type User struct {
-	Name string
-	UUID string
+	Name     string
+	UUID     string
+	Password string // TUIC password (empty for reality users)
 }
 
 // ServerConfigJSON renders the server sing-box config as JSON.
 func ServerConfigJSON(p ServerParams) ([]byte, error) {
 	users := make([]vlessUser, 0, len(p.Users))
 	for _, u := range p.Users {
-		users = append(users, vlessUser{Name: u.Name, UUID: u.UUID})
+		//$XBH_AI_PATCH_START
+		//users = append(users, vlessUser{Name: u.Name, UUID: u.UUID})
+		//$XBH_AI_PATCH_MODIFY
+		users = append(users, vlessUser{Name: u.Name, UUID: u.UUID, Password: u.Password})
+		//$XBH_AI_PATCH_END
 	}
 	cfg := config{
 		Log: &logOpts{Level: orDefault(p.LogLevel, "info")},
@@ -173,6 +213,30 @@ func ServerConfigJSON(p ServerParams) ([]byte, error) {
 		Outbounds: []outbound{{Type: "direct", Tag: "direct"}},
 		Route:     &routeOpts{Final: "direct"},
 	}
+	// Optional TUIC v5 inbound alongside REALITY: independent UDP port, real TLS
+	// cert (never REALITY). Appended only when configured, so the reality path is
+	// untouched when Tuic is nil.
+	if p.Tuic != nil {
+		tuicUsers := make([]vlessUser, 0, len(p.Tuic.Users))
+		for _, u := range p.Tuic.Users {
+			tuicUsers = append(tuicUsers, vlessUser{Name: u.Name, UUID: u.UUID, Password: u.Password})
+		}
+		cfg.Inbounds = append(cfg.Inbounds, inbound{
+			Type:              "tuic",
+			Tag:               "tuic-in",
+			Listen:            orDefault(p.Tuic.Listen, "0.0.0.0"),
+			ListenPort:        p.Tuic.ListenPort,
+			Users:             tuicUsers,
+			CongestionControl: orDefault(p.Tuic.CongestionControl, "cubic"),
+			TLS: &inboundTLS{
+				Enabled:         true,
+				ServerName:      p.Tuic.SNI,
+				ALPN:            []string{"h3"},
+				CertificatePath: p.Tuic.CertPath,
+				KeyPath:         p.Tuic.KeyPath,
+			},
+		})
+	}
 	return json.Marshal(cfg)
 }
 
@@ -187,6 +251,15 @@ type ClientParams struct {
 	ShortID     string
 	Fingerprint string // utls fingerprint, default chrome
 	LogLevel    string
+
+	// Carrier selects the outbound: "reality" (default) or "tuic". When "tuic"
+	// the TUIC fields below drive the outbound and the REALITY fields are ignored.
+	Carrier          string
+	TuicPort         uint16 // TUIC server UDP port (0 => reuse ServerPort)
+	TuicPassword     string
+	TuicSNI          string // TUIC TLS server_name ("" => reuse SNI)
+	TuicCongestion   string
+	TuicUDPRelayMode string
 }
 
 // ClientConfigJSON renders the client sing-box config as JSON.
@@ -194,6 +267,75 @@ func ClientConfigJSON(p ClientParams) ([]byte, error) {
 	host, port, err := splitHostPort(p.SocksListen)
 	if err != nil {
 		return nil, fmt.Errorf("socks_listen: %w", err)
+	}
+	//$XBH_AI_PATCH_START
+	//	cfg := config{
+	//		Log: &logOpts{Level: orDefault(p.LogLevel, "info")},
+	//		Inbounds: []inbound{{
+	//			Type:       "mixed",
+	//			Tag:        "socks-in",
+	//			Listen:     host,
+	//			ListenPort: port,
+	//		}},
+	//		Outbounds: []outbound{
+	//			{
+	//				Type:       "vless",
+	//				Tag:        "vless-out",
+	//				Server:     p.ServerAddr,
+	//				ServerPort: p.ServerPort,
+	//				UUID:       p.UUID,
+	//				TLS: &outboundTLS{
+	//					Enabled:    true,
+	//					ServerName: p.SNI,
+	//					UTLS:       &utlsOpts{Enabled: true, Fingerprint: orDefault(p.Fingerprint, "chrome")},
+	//					Reality:    &outboundReality{Enabled: true, PublicKey: p.PublicKey, ShortID: p.ShortID},
+	//				},
+	//			},
+	//			{Type: "direct", Tag: "direct"},
+	//		},
+	//		Route: &routeOpts{Final: "vless-out"},
+	//	}
+	//$XBH_AI_PATCH_MODIFY
+	// Build the carrier outbound (reality VLESS or TUIC) and the tag the route
+	// final must point at, so traffic and DNS resolve through the right carrier.
+	carrier := p.Carrier
+	if carrier == "" {
+		carrier = "reality"
+	}
+	outTag := "vless-out"
+	var ob outbound
+	switch carrier {
+	case "tuic":
+		outTag = "tuic-out"
+		ob = outbound{
+			Type:              "tuic",
+			Tag:               outTag,
+			Server:            p.ServerAddr,
+			ServerPort:        orDefaultPort(p.TuicPort, p.ServerPort),
+			UUID:              p.UUID,
+			Password:          p.TuicPassword,
+			CongestionControl: orDefault(p.TuicCongestion, "cubic"),
+			UDPRelayMode:      orDefault(p.TuicUDPRelayMode, "native"),
+			TLS: &outboundTLS{
+				Enabled:    true,
+				ServerName: orDefault(p.TuicSNI, p.SNI),
+				ALPN:       []string{"h3"},
+			},
+		}
+	default:
+		ob = outbound{
+			Type:       "vless",
+			Tag:        outTag,
+			Server:     p.ServerAddr,
+			ServerPort: p.ServerPort,
+			UUID:       p.UUID,
+			TLS: &outboundTLS{
+				Enabled:    true,
+				ServerName: p.SNI,
+				UTLS:       &utlsOpts{Enabled: true, Fingerprint: orDefault(p.Fingerprint, "chrome")},
+				Reality:    &outboundReality{Enabled: true, PublicKey: p.PublicKey, ShortID: p.ShortID},
+			},
+		}
 	}
 	cfg := config{
 		Log: &logOpts{Level: orDefault(p.LogLevel, "info")},
@@ -203,24 +345,10 @@ func ClientConfigJSON(p ClientParams) ([]byte, error) {
 			Listen:     host,
 			ListenPort: port,
 		}},
-		Outbounds: []outbound{
-			{
-				Type:       "vless",
-				Tag:        "vless-out",
-				Server:     p.ServerAddr,
-				ServerPort: p.ServerPort,
-				UUID:       p.UUID,
-				TLS: &outboundTLS{
-					Enabled:    true,
-					ServerName: p.SNI,
-					UTLS:       &utlsOpts{Enabled: true, Fingerprint: orDefault(p.Fingerprint, "chrome")},
-					Reality:    &outboundReality{Enabled: true, PublicKey: p.PublicKey, ShortID: p.ShortID},
-				},
-			},
-			{Type: "direct", Tag: "direct"},
-		},
-		Route: &routeOpts{Final: "vless-out"},
+		Outbounds: []outbound{ob, {Type: "direct", Tag: "direct"}},
+		Route:     &routeOpts{Final: outTag},
 	}
+	//$XBH_AI_PATCH_END
 	return json.Marshal(cfg)
 }
 
@@ -293,6 +421,14 @@ type TunClientParams struct {
 	Fingerprint string // utls fingerprint, default chrome
 	LogLevel    string
 
+	// Carrier selects the outbound: "reality" (default) or "tuic".
+	Carrier          string
+	TuicPort         uint16 // TUIC server UDP port (0 => reuse ServerPort)
+	TuicPassword     string
+	TuicSNI          string
+	TuicCongestion   string
+	TuicUDPRelayMode string
+
 	MTU        uint32 // tun MTU, default 9000
 	IPv6       bool   // include an IPv6 tun address / route
 	DNSAddress string // upstream DNS resolved through the tunnel, default 8.8.8.8
@@ -310,12 +446,75 @@ func TunAddress() string {
 
 // TunClientConfigJSON renders the Android tun client sing-box config as JSON.
 func TunClientConfigJSON(p TunClientParams) ([]byte, error) {
-	if p.ServerAddr == "" || p.UUID == "" || p.PublicKey == "" {
-		return nil, fmt.Errorf("tun client: server address, uuid and public key are required")
+	//$XBH_AI_PATCH_START
+	//	if p.ServerAddr == "" || p.UUID == "" || p.PublicKey == "" {
+	//		return nil, fmt.Errorf("tun client: server address, uuid and public key are required")
+	//	}
+	//$XBH_AI_PATCH_MODIFY
+	// ServerAddr/UUID are required for either carrier; the carrier-specific
+	// credential (reality public_key or TUIC password) is validated per carrier.
+	carrier := p.Carrier
+	if carrier == "" {
+		carrier = "reality"
 	}
+	if p.ServerAddr == "" || p.UUID == "" {
+		return nil, fmt.Errorf("tun client: server address and uuid are required")
+	}
+	switch carrier {
+	case "tuic":
+		if p.TuicPassword == "" {
+			return nil, fmt.Errorf("tun client: tuic_password is required for tuic carrier")
+		}
+	default:
+		if p.PublicKey == "" {
+			return nil, fmt.Errorf("tun client: public_key is required for reality carrier")
+		}
+	}
+	//$XBH_AI_PATCH_END
 	addrs := []string{tunInet4Address}
 	if p.IPv6 {
 		addrs = append(addrs, tunInet6Address)
+	}
+	//$XBH_AI_PATCH_START
+	// (original built a single VLESS-REALITY outbound; kept here for reference.)
+	//$XBH_AI_PATCH_MODIFY
+	// Build the carrier outbound and the tag both route.final and the remote-DNS
+	// detour must point at — otherwise, under the TUIC carrier, DNS and traffic
+	// would resolve through the non-existent "vless-out".
+	outTag := "vless-out"
+	var ob outbound
+	switch carrier {
+	case "tuic":
+		outTag = "tuic-out"
+		ob = outbound{
+			Type:              "tuic",
+			Tag:               outTag,
+			Server:            p.ServerAddr,
+			ServerPort:        orDefaultPort(p.TuicPort, p.ServerPort),
+			UUID:              p.UUID,
+			Password:          p.TuicPassword,
+			CongestionControl: orDefault(p.TuicCongestion, "cubic"),
+			UDPRelayMode:      orDefault(p.TuicUDPRelayMode, "native"),
+			TLS: &outboundTLS{
+				Enabled:    true,
+				ServerName: orDefault(p.TuicSNI, p.SNI),
+				ALPN:       []string{"h3"},
+			},
+		}
+	default:
+		ob = outbound{
+			Type:       "vless",
+			Tag:        outTag,
+			Server:     p.ServerAddr,
+			ServerPort: p.ServerPort,
+			UUID:       p.UUID,
+			TLS: &outboundTLS{
+				Enabled:    true,
+				ServerName: p.SNI,
+				UTLS:       &utlsOpts{Enabled: true, Fingerprint: orDefault(p.Fingerprint, "chrome")},
+				Reality:    &outboundReality{Enabled: true, PublicKey: p.PublicKey, ShortID: p.ShortID},
+			},
+		}
 	}
 	cfg := tunConfig{
 		Log: &logOpts{Level: orDefault(p.LogLevel, "info")},
@@ -325,7 +524,7 @@ func TunClientConfigJSON(p TunClientParams) ([]byte, error) {
 		// established without looping DNS back through itself.
 		DNS: &dnsOpts{
 			Servers: []dnsServer{
-				{Type: "udp", Tag: "remote-dns", Server: orDefault(p.DNSAddress, "8.8.8.8"), Detour: "vless-out"},
+				{Type: "udp", Tag: "remote-dns", Server: orDefault(p.DNSAddress, "8.8.8.8"), Detour: outTag},
 				{Type: "udp", Tag: "direct-dns", Server: "223.5.5.5", Detour: "direct"},
 			},
 			Final: "remote-dns",
@@ -339,22 +538,7 @@ func TunClientConfigJSON(p TunClientParams) ([]byte, error) {
 			StrictRoute: true,
 			Stack:       "system",
 		}},
-		Outbounds: []outbound{
-			{
-				Type:       "vless",
-				Tag:        "vless-out",
-				Server:     p.ServerAddr,
-				ServerPort: p.ServerPort,
-				UUID:       p.UUID,
-				TLS: &outboundTLS{
-					Enabled:    true,
-					ServerName: p.SNI,
-					UTLS:       &utlsOpts{Enabled: true, Fingerprint: orDefault(p.Fingerprint, "chrome")},
-					Reality:    &outboundReality{Enabled: true, PublicKey: p.PublicKey, ShortID: p.ShortID},
-				},
-			},
-			{Type: "direct", Tag: "direct", TCPFastOpen: true},
-		},
+		Outbounds: []outbound{ob, {Type: "direct", Tag: "direct", TCPFastOpen: true}},
 		Route: &tunRouteOpts{
 			Rules: []routeRule{
 				{Action: "sniff"},
@@ -362,9 +546,10 @@ func TunClientConfigJSON(p TunClientParams) ([]byte, error) {
 			},
 			AutoDetectInterface:   true,
 			DefaultDomainResolver: &domainResolver{Server: "direct-dns"},
-			Final:                 "vless-out",
+			Final:                 outTag,
 		},
 	}
+	//$XBH_AI_PATCH_END
 	return json.Marshal(cfg)
 }
 

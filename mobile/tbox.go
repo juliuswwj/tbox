@@ -41,6 +41,7 @@ type TokenInfo struct {
 	ServerPort int
 	SNI        string
 	UUID       string
+	Carrier    string // reality | tuic
 }
 
 // ParseToken decodes and validates a tbox:// token, returning a summary for
@@ -55,6 +56,7 @@ func ParseToken(tokenStr string) (*TokenInfo, error) {
 		ServerPort: int(tok.ServerPort),
 		SNI:        tok.SNI,
 		UUID:       tok.UUID,
+		Carrier:    tok.Carrier(),
 	}, nil
 }
 
@@ -83,18 +85,46 @@ func BuildConfig(tokenStr string, opts *Options) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	raw, err := singbox.TunClientConfigJSON(singbox.TunClientParams{
+	//$XBH_AI_PATCH_START
+	//	raw, err := singbox.TunClientConfigJSON(singbox.TunClientParams{
+	//		ServerAddr: tok.ServerAddr,
+	//		ServerPort: tok.ServerPort,
+	//		UUID:       tok.UUID,
+	//		SNI:        tok.SNI,
+	//		PublicKey:  tok.PublicKey,
+	//		ShortID:    tok.ShortID,
+	//		LogLevel:   opts.LogLevel,
+	//		MTU:        uint32(opts.MTU),
+	//		IPv6:       opts.IPv6,
+	//		DNSAddress: opts.DNS,
+	//	})
+	//$XBH_AI_PATCH_MODIFY
+	// Pick the carrier the token selects and fill only that carrier's fields.
+	carrier := tok.Carrier()
+	tp := singbox.TunClientParams{
 		ServerAddr: tok.ServerAddr,
 		ServerPort: tok.ServerPort,
 		UUID:       tok.UUID,
 		SNI:        tok.SNI,
-		PublicKey:  tok.PublicKey,
-		ShortID:    tok.ShortID,
 		LogLevel:   opts.LogLevel,
 		MTU:        uint32(opts.MTU),
 		IPv6:       opts.IPv6,
 		DNSAddress: opts.DNS,
-	})
+		Carrier:    carrier,
+	}
+	switch carrier {
+	case "tuic":
+		tp.TuicPort = tok.TuicPort
+		tp.TuicPassword = tok.TuicPassword
+		tp.TuicSNI = tok.TuicSNI
+		tp.TuicCongestion = tok.TuicCongestion
+		tp.TuicUDPRelayMode = tok.TuicUDPRelayMode
+	default:
+		tp.PublicKey = tok.PublicKey
+		tp.ShortID = tok.ShortID
+	}
+	raw, err := singbox.TunClientConfigJSON(tp)
+	//$XBH_AI_PATCH_END
 	if err != nil {
 		return "", err
 	}

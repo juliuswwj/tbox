@@ -2,44 +2,116 @@ package app
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 
 	"github.com/juliuswwj/tbox/internal/config"
 	"github.com/juliuswwj/tbox/internal/token"
 )
 
-// TokenFor builds the connection token for a named client in a server config.
-func TokenFor(cfg *config.ServerConfig, name string) (string, error) {
+// $XBH_AI_PATCH_START
+// // TokenFor builds the connection token for a named client in a server config.
+//
+//	func TokenFor(cfg *config.ServerConfig, name string) (string, error) {
+//		if cfg.ServerAddr == "" {
+//			return "", fmt.Errorf("server_addr must be set in the server config to emit tokens")
+//		}
+//		pub := cfg.RealityPublicKey
+//		if pub == "" {
+//			var err error
+//			pub, err = token.PublicKeyFromPrivate(cfg.RealityPrivateKey)
+//			if err != nil {
+//				return "", fmt.Errorf("derive public key: %w", err)
+//			}
+//		}
+//		var uuid string
+//		for _, c := range cfg.Clients {
+//			if c.Name == name {
+//				uuid = c.UUID
+//			}
+//		}
+//		if uuid == "" {
+//			return "", fmt.Errorf("client %q not found in config", name)
+//		}
+//		return token.Encode(token.Token{
+//			ServerAddr:  cfg.ServerAddr,
+//			ServerPort:  cfg.PublicPort(),
+//			UUID:        uuid,
+//			PublicKey:   pub,
+//			ShortID:     cfg.ShortID,
+//			SNI:         cfg.MimicHost(),
+//			ControlAddr: cfg.ControlAddr,
+//		})
+//	}
+//
+// $XBH_AI_PATCH_MODIFY
+// TokenFor builds the connection token for a named client, selecting the carrier
+// ("reality" or "tuic"). The carrier decides which credential set is baked in;
+// the token's Protocol field records the choice so the client renders the
+// matching outbound. An empty carrier defaults to "reality" (legacy behavior).
+func TokenFor(cfg *config.ServerConfig, name, carrier string) (string, error) {
 	if cfg.ServerAddr == "" {
 		return "", fmt.Errorf("server_addr must be set in the server config to emit tokens")
 	}
-	pub := cfg.RealityPublicKey
-	if pub == "" {
-		var err error
-		pub, err = token.PublicKeyFromPrivate(cfg.RealityPrivateKey)
-		if err != nil {
-			return "", fmt.Errorf("derive public key: %w", err)
-		}
+	if carrier == "" {
+		carrier = "reality"
 	}
-	var uuid string
+	var uuid, tuicPw string
 	for _, c := range cfg.Clients {
 		if c.Name == name {
 			uuid = c.UUID
+			tuicPw = c.TuicPassword
 		}
 	}
 	if uuid == "" {
 		return "", fmt.Errorf("client %q not found in config", name)
 	}
-	return token.Encode(token.Token{
+	if tuicPw == "" {
+		tuicPw = uuid // backward-compatible default: UUID doubles as TUIC password
+	}
+	tok := token.Token{
 		ServerAddr:  cfg.ServerAddr,
 		ServerPort:  cfg.PublicPort(),
 		UUID:        uuid,
-		PublicKey:   pub,
-		ShortID:     cfg.ShortID,
-		SNI:         cfg.MimicHost(),
 		ControlAddr: cfg.ControlAddr,
-	})
+	}
+	switch carrier {
+	case "tuic":
+		if !cfg.Tuic.Enable {
+			return "", fmt.Errorf("tuic carrier requested but server tuic is not enabled")
+		}
+		_, portStr, err := net.SplitHostPort(cfg.Tuic.Listen)
+		if err != nil {
+			return "", fmt.Errorf("tuic.listen: %w", err)
+		}
+		port, err := strconv.ParseUint(portStr, 10, 16)
+		if err != nil {
+			return "", fmt.Errorf("tuic.listen: invalid port %q: %w", portStr, err)
+		}
+		tok.TuicPort = uint16(port)
+		tok.TuicPassword = tuicPw
+		tok.TuicSNI = cfg.Tuic.SNI
+		tok.TuicCongestion = cfg.Tuic.CongestionControl
+		tok.Protocol = "tuic"
+	default:
+		pub := cfg.RealityPublicKey
+		if pub == "" {
+			var err error
+			pub, err = token.PublicKeyFromPrivate(cfg.RealityPrivateKey)
+			if err != nil {
+				return "", fmt.Errorf("derive public key: %w", err)
+			}
+		}
+		tok.PublicKey = pub
+		tok.ShortID = cfg.ShortID
+		tok.SNI = cfg.MimicHost()
+		tok.Protocol = "reality"
+	}
+	return token.Encode(tok)
 }
+
+//$XBH_AI_PATCH_END
 
 // InitServer generates a fresh, complete server config (REALITY keypair +
 // short id) with one initial client, writes it to path, and returns that
@@ -77,7 +149,7 @@ func InitServer(path, serverAddr, mimic, listen, firstClient string, force bool)
 	if err := config.SaveServer(path, cfg); err != nil {
 		return "", err
 	}
-	return TokenFor(cfg, firstClient)
+	return TokenFor(cfg, firstClient, "reality")
 }
 
 // AddClient generates a new client credential, appends it to the server config
@@ -100,5 +172,5 @@ func AddClient(path, name string) (string, error) {
 	if err := config.SaveServer(path, cfg); err != nil {
 		return "", err
 	}
-	return TokenFor(cfg, name)
+	return TokenFor(cfg, name, "reality")
 }

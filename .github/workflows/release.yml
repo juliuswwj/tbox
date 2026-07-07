@@ -40,9 +40,17 @@ jobs:
           PKG="tbox_${VERSION}_${GOOS}_${GOARCH}"
 
           mkdir -p "dist/$PKG"
-          go build -tags with_utls -trimpath \
+          #$XBH_AI_PATCH_START
+          #go build -tags with_utls -trimpath \
+          #  -ldflags "-s -w -X main.version=${VERSION}" \
+          #  -o "dist/$PKG/$BIN" ./cmd/tbox
+          #$XBH_AI_PATCH_MODIFY
+          # with_quic is required so sing-box registers the TUIC v5 protocol
+          # (without it quic_stub.go makes "type":"tuic" fail at config parse).
+          go build -tags 'with_utls with_quic' -trimpath \
             -ldflags "-s -w -X main.version=${VERSION}" \
             -o "dist/$PKG/$BIN" ./cmd/tbox
+          #$XBH_AI_PATCH_END
           cp README.md "dist/$PKG/" 2>/dev/null || true
           cp -r configs deploy "dist/$PKG/" 2>/dev/null || true
 
