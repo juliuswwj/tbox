@@ -111,6 +111,8 @@ type inbound struct {
 	CongestionControl string `json:"congestion_control,omitempty"`
 	AuthTimeout       string `json:"auth_timeout,omitempty"`
 	Heartbeat         string `json:"heartbeat,omitempty"`
+	// TPROXY fields (used when Type == "tproxy"; ignored otherwise).
+	Network []string `json:"network,omitempty"`
 }
 
 type outbound struct {
@@ -344,6 +346,12 @@ func ClientConfigJSON(p ClientParams) ([]byte, error) {
 			Tag:        "socks-in",
 			Listen:     host,
 			ListenPort: port,
+		}, {
+			Type:       "tproxy",
+			Tag:        "tproxy-in",
+			Listen:     "0.0.0.0",
+			ListenPort: 12345,
+			Network:    []string{"tcp", "udp"},
 		}},
 		Outbounds: []outbound{ob, {Type: "direct", Tag: "direct"}},
 		Route:     &routeOpts{Final: outTag},
