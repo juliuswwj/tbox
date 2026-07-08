@@ -92,11 +92,16 @@ class TboxVpnService : VpnService() {
             }
         }
 
-        // Tell Android to use the TUN address as DNS — sing-box's hijack-dns
-		// rule intercepts UDP/53 on this address and resolves through its
-		// configured upstream (8.8.8.8 via vless-out).
-		val dnsAddr = tunIp.substringBefore("/")
-		builder.addDnsServer(dnsAddr)
+        // Use a non-local address inside the TUN subnet as DNS. Android sends
+        // DNS to the VPN's DNS server; if we set the TUN address itself
+        // (198.18.0.1), the Linux stack delivers those packets locally
+        // (no listener on :53), bypassing the TUN and the hijack-dns rule.
+        // A sibling address (198.18.0.2) routes through the TUN and gets
+        // intercepted correctly.
+        val parts = tunIp.split("/")
+        val ipParts = parts[0].split(".")
+        val dnsAddr = "${ipParts[0]}.${ipParts[1]}.${ipParts[2]}.${ipParts[3].toInt() + 1}"
+        builder.addDnsServer(dnsAddr)
 
         // Never route our own traffic; the carrier socket is protected anyway.
         runCatching { builder.addDisallowedApplication(packageName) }

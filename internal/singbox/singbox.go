@@ -537,6 +537,9 @@ func TunClientConfigJSON(p TunClientParams) ([]byte, error) {
 		// direct-dns resolves the carrier server's own domain over the underlying
 		// network (via route.default_domain_resolver) so the tunnel can be
 		// established without looping DNS back through itself.
+		// strategy: "prefer_ipv4" avoids returning AAAA records when the TUN
+		// IPv6 default route is ::/0 unreachable, so apps don't fail-fast on
+		// an unreachable IPv6 connect before trying IPv4.
 		DNS: &dnsOpts{
 			Servers: []dnsServer{
 				{Type: "udp", Tag: "remote-dns", Server: orDefault(p.DNSAddress, "8.8.8.8"), Detour: outTag},
