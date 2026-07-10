@@ -14,10 +14,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { goos: linux,   goarch: amd64 }
-          - { goos: linux,   goarch: arm64 }
-          - { goos: darwin,  goarch: amd64 }
-          - { goos: darwin,  goarch: arm64 }
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
           - { goos: windows, goarch: amd64 }
     steps:
       - uses: actions/checkout@v4
@@ -39,46 +39,27 @@ jobs:
           [ "$GOOS" = windows ] && BIN=tbox.exe
           PKG="tbox_${VERSION}_${GOOS}_${GOARCH}"
 
-          mkdir -p pkg/"$PKG"
+          mkdir -p "dist/$PKG"
           go build -tags with_utls -trimpath \
             -ldflags "-s -w -X main.version=${VERSION}" \
-            -o "pkg/$PKG/$BIN" ./cmd/tbox
-          cp README.md "pkg/$PKG/" 2>/dev/null || true
-          cp -r configs deploy "pkg/$PKG/" 2>/dev/null || true
+            -o "dist/$PKG/$BIN" ./cmd/tbox
+          cp README.md "dist/$PKG/" 2>/dev/null || true
+          cp -r configs deploy "dist/$PKG/" 2>/dev/null || true
 
-          cd pkg
+          cd dist
           if [ "$GOOS" = windows ]; then
             zip -r "${PKG}.zip" "$PKG"
             sha256sum "${PKG}.zip" > "${PKG}.zip.sha256"
-            echo "asset=${PKG}.zip" >> "$GITHUB_ENV"
-            echo "asset_sha=${PKG}.zip.sha256" >> "$GITHUB_ENV"
           else
             tar czf "${PKG}.tar.gz" "$PKG"
             sha256sum "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256"
-            echo "asset=${PKG}.tar.gz" >> "$GITHUB_ENV"
-            echo "asset_sha=${PKG}.tar.gz.sha256" >> "$GITHUB_ENV"
           fi
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pkg-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: |
-            pkg/${{ env.asset }}
-            pkg/${{ env.asset_sha }}
-          if-no-files-found: error
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          pattern: pkg-*
-          merge-multiple: true
-
-      - name: Publish release
+      - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
           generate_release_notes: true
