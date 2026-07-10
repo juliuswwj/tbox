@@ -8,16 +8,16 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  native:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { goos: linux, goarch: amd64 }
-          - { goos: linux, goarch: arm64 }
-          - { goos: darwin, goarch: amd64 }
-          - { goos: darwin, goarch: arm64 }
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
           - { goos: windows, goarch: amd64 }
     steps:
       - uses: actions/checkout@v4
@@ -39,22 +39,14 @@ jobs:
           [ "$GOOS" = windows ] && BIN=tbox.exe
           PKG="tbox_${VERSION}_${GOOS}_${GOARCH}"
 
-          mkdir -p "dist/$PKG"
-          #$XBH_AI_PATCH_START
-          #go build -tags with_utls -trimpath \
-          #  -ldflags "-s -w -X main.version=${VERSION}" \
-          #  -o "dist/$PKG/$BIN" ./cmd/tbox
-          #$XBH_AI_PATCH_MODIFY
-          # with_quic is required so sing-box registers the TUIC v5 protocol
-          # (without it quic_stub.go makes "type":"tuic" fail at config parse).
+          mkdir -p pkg/"$PKG"
           go build -tags 'with_utls with_quic' -trimpath \
             -ldflags "-s -w -X main.version=${VERSION}" \
-            -o "dist/$PKG/$BIN" ./cmd/tbox
-          #$XBH_AI_PATCH_END
-          cp README.md "dist/$PKG/" 2>/dev/null || true
-          cp -r configs deploy "dist/$PKG/" 2>/dev/null || true
+            -o "pkg/$PKG/$BIN" ./cmd/tbox
+          cp README.md "pkg/$PKG/" 2>/dev/null || true
+          cp -r configs deploy "pkg/$PKG/" 2>/dev/null || true
 
-          cd dist
+          cd pkg
           if [ "$GOOS" = windows ]; then
             zip -r "${PKG}.zip" "$PKG"
             sha256sum "${PKG}.zip" > "${PKG}.zip.sha256"
@@ -63,19 +55,12 @@ jobs:
             sha256sum "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256"
           fi
 
-      - name: Publish release assets
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          files: |
-            dist/*.tar.gz
-            dist/*.zip
-            dist/*.sha256
-          generate_release_notes: true
+          name: native-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: pkg/*
+          if-no-files-found: error
 
-  # Android client APK, built from the same release tag. Produces app-debug.apk
-  # (which carries the Carrier tun client, libbox runtime, and the tbox gomobile
-  # helper). The APK is large (several ABI .so files) but is the only artifact a
-  # user needs on-device.
   android:
     runs-on: ubuntu-latest
     steps:
@@ -122,16 +107,30 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME}"
-          mkdir -p dist
+          mkdir -p pkg
           cp android/app/build/outputs/apk/debug/app-debug.apk \
-             "dist/tbox_${VERSION}_android.apk"
-          sha256sum "dist/tbox_${VERSION}_android.apk" > \
-                    "dist/tbox_${VERSION}_android.apk.sha256"
+             "pkg/tbox_${VERSION}_android.apk"
+          sha256sum "pkg/tbox_${VERSION}_android.apk" > \
+                    "pkg/tbox_${VERSION}_android.apk.sha256"
 
-      - name: Publish release assets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: pkg/*
+          if-no-files-found: error
+
+  release:
+    needs: [native, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: '*'
+          merge-multiple: true
+
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/tbox_${{ github.ref_name }}_android.apk
-            dist/tbox_${{ github.ref_name }}_android.apk.sha256
+          files: dist/*
           generate_release_notes: true
