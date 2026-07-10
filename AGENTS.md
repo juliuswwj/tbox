@@ -25,9 +25,28 @@ make android
 
 # 编译 Go 二进制
 make build
+
+# 运行单元测试
+make test
 ```
 
 APK 输出路径：`android/app/build/outputs/apk/debug/app-debug.apk`
+
+## Android 客户端连接状态诊断
+
+客户端不再直接跳转到 CONNECTED，而是经过以下状态转换：
+
+```
+IDLE → CONNECTING → CHECKING → CONNECTED
+                              → CONNECTED_NO_NET
+```
+
+1. **CONNECTING**: VpnService 启动，TUN 接口创建中。
+2. **CHECKING**: TUN 创建后进入连通性检测阶段。通过 TUN 隧道向 `https://ifconfig.io` 发 HEAD 请求，渐进式重试（1.5s → 3s → ... → 最大 10 次）。确认 HTTP 200 后进入 CONNECTED。
+3. **CONNECTED**: 隧道畅通，显示 TUN IP。
+4. **CONNECTED_NO_NET**: 隧道建立但流量不通，或后续定期检测（30s 间隔）发现断开。
+
+健康检测需要 app 自身流量经过 TUN，因此 `createTun()` 中**不再调用 `addDisallowedApplication`**。sing-box 的 carrier socket 由 `VpnService.protect()` 保护绕过 VPN，不会产生路由环路。
 
 ## ADB 设备
 
@@ -36,6 +55,12 @@ APK 输出路径：`android/app/build/outputs/apk/debug/app-debug.apk`
 ```bash
 adb install android/app/build/outputs/apk/debug/app-debug.apk
 ```
+
+## Pi 设备 (orangepizero2w) service 冲突问题
+
+Pi 上的 `wifi-server.service` (旧) 和 `wifi-ui.service` (新) 是重复的服务，都监听 port 80 并启动同一个 `wifi_server.py`。旧服务先启动抢到端口，新服务 crash-loop。
+
+**修复**：`sudo systemctl disable --now wifi-setup.service` 停掉旧服务。
 
 ## Pi 设备 (orangepizero2w) DNS 架构
 
@@ -88,3 +113,4 @@ Internet ←→ tbox 隧道 ←→ tbox0 (172.30.0.2/24) ←→ Pi
 3. **Pi 本机 DNS 正常但 dnsmasq 失败**：优先检查 `ip route show table 100` 是否为空。
 4. **dnsmasq 上游可达性验证**：`sudo nsenter -t $(pgrep -f 'dnsmasq.*br-lan') -n nslookup baidu.com`
 5. **部署到 Pi**：`scp deploy/mode-apply.sh pi:/home/orangepi/tbox/`
+6. **webUI "no tunnel" 误报**：`wifi_server.py` 中 `get_exit_ip()` 使用 `--socks5-hostname`（代理端 DNS）而非 `--socks5`（本地 DNS），避免 Pi 本机 DNS 被 iptables 阻断导致隧道检查失败。`/api/status` 主动调用 `get_exit_ip()` 而非读缓存。

@@ -5,7 +5,9 @@
     <string name="disconnect">Disconnect</string>
     <string name="status_idle">Not connected</string>
     <string name="status_connecting">Connecting…</string>
+    <string name="status_checking">Checking connectivity…</string>
     <string name="status_connected">Connected</string>
+    <string name="status_connected_no_net">Connected (no internet)</string>
     <string name="notif_channel">tbox VPN</string>
     <string name="notif_title">tbox connected</string>
 </resources>

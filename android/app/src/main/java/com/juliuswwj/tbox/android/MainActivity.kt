@@ -92,21 +92,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun render(state: TboxVpnService.State, error: String?) {
-        binding.statusText.text = when {
+        val statusText = when {
             error != null -> "Error: $error"
-            state == TboxVpnService.State.CONNECTED -> getString(R.string.status_connected)
             state == TboxVpnService.State.CONNECTING -> getString(R.string.status_connecting)
+            state == TboxVpnService.State.CHECKING -> getString(R.string.status_checking)
+            state == TboxVpnService.State.CONNECTED_NO_NET -> getString(R.string.status_connected_no_net)
+            state == TboxVpnService.State.CONNECTED -> getString(R.string.status_connected)
             else -> getString(R.string.status_idle)
         }
-        binding.tunIpText.text = if (state == TboxVpnService.State.CONNECTED && TboxVpnService.tunIp.isNotEmpty()) {
-            "TUN: ${TboxVpnService.tunIp}"
-        } else ""
-        binding.tunIpText.visibility = if (state == TboxVpnService.State.CONNECTED && TboxVpnService.tunIp.isNotEmpty()) {
-            android.view.View.VISIBLE
-        } else android.view.View.GONE
+        binding.statusText.text = statusText
+
+        val hasTun = TboxVpnService.tunIp.isNotEmpty() &&
+            state != TboxVpnService.State.IDLE
+        binding.tunIpText.text = if (hasTun) "TUN: ${TboxVpnService.tunIp}" else ""
+        binding.tunIpText.visibility = if (hasTun) android.view.View.VISIBLE else android.view.View.GONE
+
+        val isIdle = state == TboxVpnService.State.IDLE
         binding.connectButton.setText(
-            if (state == TboxVpnService.State.IDLE) R.string.connect else R.string.disconnect,
+            if (isIdle) R.string.connect else R.string.disconnect,
         )
-        binding.tokenInput.isEnabled = state == TboxVpnService.State.IDLE
+        binding.tokenInput.isEnabled = isIdle
     }
 }

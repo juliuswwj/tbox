@@ -17,6 +17,13 @@ import com.juliuswwj.tbox.libbox.TunOptions
 import com.juliuswwj.tbox.mobile.Mobile
 import com.juliuswwj.tbox.mobile.Options
 import com.juliuswwj.tbox.mobile.Service
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.net.HttpURLConnection
+import java.net.URL
 
 /**
  * VpnService that runs the embedded sing-box (VLESS-REALITY outbound behind a
@@ -26,6 +33,8 @@ import com.juliuswwj.tbox.mobile.Service
 class TboxVpnService : VpnService() {
 
     private var boxService: Service? = null
+    private val scope = CoroutineScope(Dispatchers.IO)
+    private var healthJob: Job? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -58,14 +67,78 @@ class TboxVpnService : VpnService() {
                 setTempPath(cacheDir.absolutePath)
             }
             boxService = Mobile.start(token, opts, TboxPlatform(this, this))
-            setState(State.CONNECTED, null)
+            setState(State.CHECKING, null)
+            startHealthCheck()
         } catch (e: Exception) {
             Log.e("tbox", "start failed", e)
             stopVpn(e.message ?: e.toString())
         }
     }
 
+    private fun startHealthCheck() {
+        healthJob?.cancel()
+        healthJob = scope.launch {
+            val ok = checkConnectivity()
+            if (boxService == null) return@launch
+            if (ok) {
+                setState(State.CONNECTED, null)
+                startPeriodicHealth()
+            } else {
+                setState(State.CONNECTED_NO_NET, "Tunnel established but traffic not flowing")
+            }
+        }
+    }
+
+    private suspend fun checkConnectivity(): Boolean {
+        repeat(10) { attempt ->
+            delay(1500L * (attempt + 1))
+            if (boxService == null) return false
+            try {
+                val conn = URL("https://ifconfig.io").openConnection() as HttpURLConnection
+                conn.setRequestProperty("User-Agent", "tbox/1.0")
+                conn.connectTimeout = 5000
+                conn.readTimeout = 5000
+                conn.requestMethod = "HEAD"
+                val code = conn.responseCode
+                conn.disconnect()
+                if (code == 200) return true
+            } catch (_: Exception) {
+            }
+        }
+        return false
+    }
+
+    private fun startPeriodicHealth() {
+        healthJob?.cancel()
+        healthJob = scope.launch {
+            while (boxService != null) {
+                delay(30_000L)
+                if (!checkConnectivityOnce()) {
+                    setState(State.CONNECTED_NO_NET, "Tunnel connection lost")
+                    break
+                }
+            }
+        }
+    }
+
+    private suspend fun checkConnectivityOnce(): Boolean {
+        return try {
+            val conn = URL("https://ifconfig.io").openConnection() as HttpURLConnection
+            conn.setRequestProperty("User-Agent", "tbox/1.0")
+            conn.connectTimeout = 5000
+            conn.readTimeout = 5000
+            conn.requestMethod = "HEAD"
+            val ok = conn.responseCode == 200
+            conn.disconnect()
+            ok
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun stopVpn(error: String?) {
+        healthJob?.cancel()
+        healthJob = null
         runCatching { boxService?.close() }
         boxService = null
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
@@ -102,9 +175,6 @@ class TboxVpnService : VpnService() {
         val ipParts = parts[0].split(".")
         val dnsAddr = "${ipParts[0]}.${ipParts[1]}.${ipParts[2]}.${ipParts[3].toInt() + 1}"
         builder.addDnsServer(dnsAddr)
-
-        // Never route our own traffic; the carrier socket is protected anyway.
-        runCatching { builder.addDisallowedApplication(packageName) }
 
         val pfd = builder.establish() ?: throw IllegalStateException("VpnService.establish() returned null")
         return pfd.detachFd()
@@ -150,12 +220,14 @@ class TboxVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        healthJob?.cancel()
+        healthJob = null
         runCatching { boxService?.close() }
         boxService = null
         super.onDestroy()
     }
 
-    enum class State { IDLE, CONNECTING, CONNECTED }
+    enum class State { IDLE, CONNECTING, CHECKING, CONNECTED, CONNECTED_NO_NET }
 
     companion object {
         const val ACTION_DISCONNECT = "com.juliuswwj.tbox.android.DISCONNECT"
